@@ -225,6 +225,22 @@ class Repository:
         task.is_active = False
         await self.session.flush()
 
+    async def get_forgettable_one_time_tasks(self, cutoff_date: date) -> list[Task]:
+        """Активные одноразовые задачи с датой раньше cutoff_date.
+
+        Через сутки после истечения срока одноразовая задача «забывается»
+        (деактивируется): передаётся cutoff = today - 1 день, под условие
+        попадают задачи с one_time_date < cutoff (т.е. старше, чем вчера).
+        """
+        result = await self.session.execute(
+            select(Task).where(
+                Task.is_active.is_(True),
+                Task.frequency_type == FrequencyType.one_time,
+                Task.one_time_date < cutoff_date,
+            )
+        )
+        return list(result.scalars().all())
+
     # ------------------------------------------------------------------ #
     #  TaskLogs
     # ------------------------------------------------------------------ #

@@ -30,7 +30,6 @@ from bot.keyboards.builders import (
     frequency_kb,
     has_reminder_kb,
     month_kb,
-    task_confirm_kb,
     year_kb,
 )
 from bot.services.scheduler import SchedulerService
@@ -304,12 +303,13 @@ async def reminder_no(
     repo: Repository,
     scheduler: SchedulerService,
 ) -> None:
-    """Без напоминания — сохранить задачу и показать подтверждение (редактируем)."""
+    """Без напоминания — сохранить задачу и показать подтверждение, редактируя сообщение."""
     if callback.message is None:
         await callback.answer()
         return
     confirm = await _create_task(state, repo, scheduler, callback.from_user.id, None)
-    await callback.message.edit_text(confirm, reply_markup=task_confirm_kb())
+    # Редактируем сообщение на месте: текст подтверждения, инлайн-клавиатуру убираем.
+    await callback.message.edit_text(confirm, reply_markup=None)
     await callback.answer()
 
 
@@ -364,7 +364,7 @@ async def reminder_time_input(
             return
 
     confirm = await _create_task(state, repo, scheduler, message.from_user.id, parsed)
-    await message.answer(confirm, reply_markup=task_confirm_kb())
+    await message.answer(confirm, reply_markup=REMOVE_KB)
 
 
 async def _create_task(
@@ -406,26 +406,3 @@ async def _create_task(
     )
 
 
-# --------------------------------------------------------------------------- #
-#  Подтверждение: «+ Добавить ещё» / «Готово»
-# --------------------------------------------------------------------------- #
-
-@router.callback_query(F.data == "add_more")
-async def confirm_add_more(callback: CallbackQuery, state: FSMContext) -> None:
-    """«+ Добавить ещё» — убрать кнопки и начать новую задачу."""
-    if callback.message is not None:
-        await callback.message.edit_reply_markup(reply_markup=None)
-        await start_add_task(callback.message, state)
-    await callback.answer()
-
-
-@router.callback_query(F.data == "add_done")
-async def confirm_done(callback: CallbackQuery, state: FSMContext) -> None:
-    """«Готово» — убрать кнопки и показать главное меню."""
-    await state.clear()
-    if callback.message is not None:
-        await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.message.answer(
-            escape_md(TEXTS["main_menu"]), reply_markup=REMOVE_KB
-        )
-    await callback.answer()

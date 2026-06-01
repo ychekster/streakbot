@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytz
 from aiogram import Bot
@@ -189,19 +189,16 @@ class SchedulerService:
             logger.error("Failed to send message to {}: {}", user_id, exc)
 
     async def send_morning_digest(self, user_id: int) -> None:
-        """Утренний дайджест: список задач на сегодня + создание pending-логов."""
+        """Утренний дайджест: задачи на сегодня + блок просроченных + pending-логи."""
         # Ленивый импорт, чтобы избежать цикла импорта с хендлерами.
-        from bot.handlers.today import build_today_digest
+        from bot.handlers.today import build_morning_digest
 
         async with self.session_factory() as session:
             repo = Repository(session)
             user = await repo.get_user(user_id)
             if user is None or not user.is_active:
                 return
-            text = await build_today_digest(
-                repo, user, header_key="digest_morning_header",
-                empty_key="digest_morning_no_tasks",
-            )
+            text = await build_morning_digest(repo, user)
             await session.commit()
         await self._safe_send(user_id, text)
         logger.info("Morning digest sent to user {}", user_id)
@@ -256,20 +253,33 @@ class SchedulerService:
             user = await repo.get_user(task.user_id)
             if user is None or not user.is_active:
                 return
-            text = escape_md(
-                TEXTS["reminder_text"].format(name=task.name, task_id=task.id)
-            )
+            text = escape_md(TEXTS["reminder_text"].format(name=task.name))
             user_id = task.user_id
         await self._safe_send(user_id, text)
         logger.info("Reminder sent for task {}", task_id)
 
     async def check_and_expire_tasks(self) -> None:
-        """Глобально перевести просроченные pending-логи в статус missed."""
+        """Перевести просроченные pending-логи в missed и «забыть» старые one_time.
+
+        Одноразовая задача забывается (деактивируется) через сутки после
+        истечения срока: на дату D она ещё видна в дайджесте дня D+1 как
+        просроченная, а начиная с D+2 — деактивируется и её напоминание снимается.
+        """
         today_utc = datetime.now(pytz.utc).date()
+        forget_cutoff = today_utc - timedelta(days=1)
         async with self.session_factory() as session:
             repo = Repository(session)
             expired = await repo.get_expired_pending_logs(today_utc)
             if expired:
                 await repo.mark_logs_missed(expired)
-                await session.commit()
-        logger.info("Expired {} pending task logs", len(expired))
+
+            forgettable = await repo.get_forgettable_one_time_tasks(forget_cutoff)
+            for task in forgettable:
+                await repo.soft_delete_task(task)
+                self.remove_task_reminder_job(task.id)
+
+            await session.commit()
+        logger.info(
+            "Expired {} pending logs, forgot {} one-time tasks",
+            len(expired), len(forgettable),
+        )

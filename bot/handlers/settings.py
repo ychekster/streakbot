@@ -1,15 +1,16 @@
 """/settings — просмотр и изменение настроек.
 
-Логика изменения времени и часового пояса переиспользует функции онбординга
-(validate_morning / validate_evening / resolve_timezone, тексты шагов), чтобы не
-дублировать код. Этот роутер регистрируется последним, поэтому здесь же лежит
-fallback-обработчик «пустых»/устаревших callback'ов.
+Логика валидации времени и разбора часового пояса переиспользует функции
+онбординга (validate_morning / validate_evening / resolve_timezone), но тексты
+запросов — собственные (settings_*_prompt), а не шаги регистрации. Этот роутер
+регистрируется последним, поэтому здесь же лежит fallback-обработчик
+«пустых»/устаревших callback'ов.
 """
 
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
@@ -28,9 +29,6 @@ from bot.database.models import User
 from bot.database.repository import Repository
 from bot.handlers.onboarding import (
     resolve_timezone,
-    step1_text,
-    step2_text,
-    step3_text,
     validate_evening,
     validate_morning,
 )
@@ -94,21 +92,27 @@ async def cmd_settings(message: Message, state: FSMContext, repo: Repository) ->
 async def settings_pick_morning(message: Message, state: FSMContext) -> None:
     """«Изменить утреннее» — запросить новое время."""
     await state.set_state(SettingsStates.morning_time)
-    await message.answer(step1_text(), reply_markup=morning_time_kb())
+    await message.answer(
+        escape_md(TEXTS["settings_morning_prompt"]), reply_markup=morning_time_kb()
+    )
 
 
 @router.message(SettingsStates.idle, F.text == BTN_SETTINGS_EVENING)
 async def settings_pick_evening(message: Message, state: FSMContext) -> None:
     """«Изменить вечернее» — запросить новое время."""
     await state.set_state(SettingsStates.evening_time)
-    await message.answer(step2_text(), reply_markup=evening_time_kb())
+    await message.answer(
+        escape_md(TEXTS["settings_evening_prompt"]), reply_markup=evening_time_kb()
+    )
 
 
 @router.message(SettingsStates.idle, F.text == BTN_SETTINGS_TIMEZONE)
 async def settings_pick_timezone(message: Message, state: FSMContext) -> None:
     """«Изменить пояс» — запросить новый часовой пояс."""
     await state.set_state(SettingsStates.timezone_select)
-    await message.answer(step3_text(), reply_markup=timezone_kb())
+    await message.answer(
+        escape_md(TEXTS["settings_timezone_prompt"]), reply_markup=timezone_kb()
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -177,8 +181,7 @@ async def _apply_timezone(
 
 
 @router.message(
-    SettingsStates.timezone_select,
-    SettingsStates.timezone_city,
+    StateFilter(SettingsStates.timezone_select, SettingsStates.timezone_city),
     ~Command(*COMMANDS),
 )
 async def settings_timezone(
@@ -228,12 +231,16 @@ async def settings_timezone_confirm(
         tz = data.get("pending_tz")
         if not tz:
             await state.set_state(SettingsStates.timezone_select)
-            await message.answer(step3_text(), reply_markup=timezone_kb())
+            await message.answer(
+                escape_md(TEXTS["settings_timezone_prompt"]), reply_markup=timezone_kb()
+            )
             return
         await _apply_timezone(message, state, repo, scheduler, tz)
     elif message.text == BTN_NO:
         await state.set_state(SettingsStates.timezone_select)
-        await message.answer(step3_text(), reply_markup=timezone_kb())
+        await message.answer(
+            escape_md(TEXTS["settings_timezone_prompt"]), reply_markup=timezone_kb()
+        )
     else:
         data = await state.get_data()
         city = data.get("pending_city", "")

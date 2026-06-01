@@ -19,16 +19,15 @@ from aiogram.types import (
 )
 
 from bot.constants import (
-    BTN_ADD_MORE,
     BTN_ADD_TASK,
     BTN_BACK,
     BTN_DELETE,
-    BTN_DONE,
     BTN_DONE_MARK,
     BTN_FREQ_DAILY,
     BTN_FREQ_ONETIME,
     BTN_FREQ_SPECIFIC,
-    BTN_MARK,
+    BTN_NAV_NEXT,
+    BTN_NAV_PREV,
     BTN_NO,
     BTN_REMINDER_NO,
     BTN_REMINDER_YES,
@@ -36,8 +35,9 @@ from bot.constants import (
     BTN_SETTINGS_MORNING,
     BTN_SETTINGS_TIMEZONE,
     BTN_SKIP,
-    BTN_SKIP_MARK,
     BTN_START,
+    BTN_TODAY_BACK,
+    BTN_UNDO,
     BTN_YES,
     DELETE_PAGE_SIZE,
     EVENING_TIME_PRESETS,
@@ -194,39 +194,93 @@ def has_reminder_kb() -> InlineKeyboardMarkup:
     )
 
 
-def task_confirm_kb() -> InlineKeyboardMarkup:
-    """После добавления задачи: добавить ещё или завершить."""
+# --------------------------------------------------------------------------- #
+#  Inline-клавиатуры списка и карточки задачи (/today, /done)
+# --------------------------------------------------------------------------- #
+
+# Сетка кнопок: до 8 задач — без пагинации (ряды по 2); больше — по 6 на странице
+# (3 ряда по 2) + навигационный ряд «‹ Назад» / «Далее ›».
+_GRID_NO_PAGE_MAX = 8
+_GRID_PAGE_SIZE = 6
+
+
+def _task_grid(
+    items: list[tuple[int, str]],
+    page: int,
+    open_prefix: str,
+    page_prefix: str,
+) -> InlineKeyboardMarkup:
+    """Сетка кнопок-задач (по 2 в ряд) с опциональной пагинацией.
+
+    Нумерация кнопок сквозная (с учётом страницы) и совпадает с нумерацией в
+    тексте сообщения.
+    """
+    total = len(items)
+    nav_row: list[InlineKeyboardButton] = []
+    if total <= _GRID_NO_PAGE_MAX:
+        start = 0
+        page_items = items
+    else:
+        total_pages = (total + _GRID_PAGE_SIZE - 1) // _GRID_PAGE_SIZE
+        page = max(0, min(page, total_pages - 1))
+        start = page * _GRID_PAGE_SIZE
+        page_items = items[start : start + _GRID_PAGE_SIZE]
+        if page > 0:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text=BTN_NAV_PREV, callback_data=f"{page_prefix}:{page - 1}"
+                )
+            )
+        if page < total_pages - 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text=BTN_NAV_NEXT, callback_data=f"{page_prefix}:{page + 1}"
+                )
+            )
+
+    buttons = [
+        InlineKeyboardButton(
+            text=f"{start + i + 1}. {_truncate(name)}",
+            callback_data=f"{open_prefix}:{task_id}",
+        )
+        for i, (task_id, name) in enumerate(page_items)
+    ]
+    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+    if nav_row:
+        rows.append(nav_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def today_list_kb(active: list[tuple[int, str]], page: int = 0) -> InlineKeyboardMarkup:
+    """Список /today: кнопки только для невыполненных задач (сетка + пагинация)."""
+    return _task_grid(active, page, "today_open", "today_page")
+
+
+def done_list_kb(completed: list[tuple[int, str]], page: int = 0) -> InlineKeyboardMarkup:
+    """Список /done: кнопки выполненных задач (сетка + пагинация)."""
+    return _task_grid(completed, page, "done_open", "done_page")
+
+
+def today_card_kb(task_id: int) -> InlineKeyboardMarkup:
+    """Карточка задачи из /today: «✅ Выполнено» и «‹ Назад» (к списку)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=BTN_ADD_MORE, callback_data="add_more"),
-                InlineKeyboardButton(text=BTN_DONE, callback_data="add_done"),
-            ]
+                InlineKeyboardButton(
+                    text=BTN_DONE_MARK, callback_data=f"today_done:{task_id}"
+                )
+            ],
+            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="today_back_list")],
         ]
     )
 
 
-# --------------------------------------------------------------------------- #
-#  Inline-клавиатуры карточки задачи (/taskN)
-# --------------------------------------------------------------------------- #
-
-def task_mark_kb(task_id: int) -> InlineKeyboardMarkup:
-    """Кнопка «Отметить выполнение» на карточке задачи."""
+def done_card_kb(task_id: int) -> InlineKeyboardMarkup:
+    """Карточка задачи из /done: «Отменить выполнение» и «‹ Назад» (к списку)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=BTN_MARK, callback_data=f"mark:{task_id}")]
-        ]
-    )
-
-
-def task_done_skip_kb(task_id: int) -> InlineKeyboardMarkup:
-    """Выбор результата: Выполнено / Не выполнено."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text=BTN_DONE_MARK, callback_data=f"done:{task_id}"),
-                InlineKeyboardButton(text=BTN_SKIP_MARK, callback_data=f"skip:{task_id}"),
-            ]
+            [InlineKeyboardButton(text=BTN_UNDO, callback_data=f"done_undo:{task_id}")],
+            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="done_back_list")],
         ]
     )
 
@@ -243,20 +297,24 @@ def _truncate(name: str) -> str:
 
 
 def _pagination_row(page: int, total_pages: int, prefix: str) -> list[InlineKeyboardButton]:
-    """Собрать навигационный ряд: ◀️ «Страница X из N» ▶️.
+    """Собрать навигационный ряд: «‹ Назад» «Страница X из N» «Далее ›».
 
-    На первой странице нет «◀️», на последней — «▶️».
+    На первой странице нет «‹ Назад», на последней — «Далее ›».
     """
     row: list[InlineKeyboardButton] = []
     if page > 0:
-        row.append(InlineKeyboardButton(text="◀️", callback_data=f"{prefix}:{page - 1}"))
+        row.append(
+            InlineKeyboardButton(text=BTN_NAV_PREV, callback_data=f"{prefix}:{page - 1}")
+        )
     row.append(
         InlineKeyboardButton(
             text=f"Страница {page + 1} из {total_pages}", callback_data="noop"
         )
     )
     if page < total_pages - 1:
-        row.append(InlineKeyboardButton(text="▶️", callback_data=f"{prefix}:{page + 1}"))
+        row.append(
+            InlineKeyboardButton(text=BTN_NAV_NEXT, callback_data=f"{prefix}:{page + 1}")
+        )
     return row
 
 

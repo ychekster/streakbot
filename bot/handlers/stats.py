@@ -8,13 +8,22 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from bot.constants import STATS_PAGE_SIZE, TEXTS
-from bot.database.models import Task
+from bot.database.models import FrequencyType, Task
 from bot.database.repository import Repository
 from bot.keyboards.builders import REMOVE_KB, stats_nav_kb
 from bot.services.streak import get_current_streak, get_max_streak
 from bot.utils.validators import escape_md
 
 router = Router(name="stats")
+
+
+async def _stats_tasks(repo: Repository, user_id: int) -> list[Task]:
+    """Активные задачи для статистики — без одноразовых (они не участвуют в стриках)."""
+    return [
+        task
+        for task in await repo.get_active_tasks(user_id)
+        if task.frequency_type != FrequencyType.one_time
+    ]
 
 
 async def _render_stats(
@@ -43,7 +52,7 @@ async def _render_stats(
 async def cmd_stats(message: Message, state: FSMContext, repo: Repository) -> None:
     """Показать статистику."""
     await state.clear()
-    tasks = await repo.get_active_tasks(message.from_user.id)
+    tasks = await _stats_tasks(repo, message.from_user.id)
     if not tasks:
         await message.answer(escape_md(TEXTS["stats_no_tasks"]), reply_markup=REMOVE_KB)
         return
@@ -58,7 +67,7 @@ async def stats_paginate(callback: CallbackQuery, repo: Repository) -> None:
         await callback.answer()
         return
     page = int(callback.data.split(":", 1)[1])
-    tasks = await repo.get_active_tasks(callback.from_user.id)
+    tasks = await _stats_tasks(repo, callback.from_user.id)
     if not tasks:
         await callback.message.edit_text(escape_md(TEXTS["stats_no_tasks"]))
         await callback.answer()
