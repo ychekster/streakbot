@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytz
@@ -34,6 +35,7 @@ from bot.handlers import (
     stats,
     today,
 )
+from bot.middlewares.activity import ActivityMiddleware
 from bot.middlewares.database import DatabaseMiddleware
 from bot.middlewares.registration import RegistrationMiddleware
 from bot.services.scheduler import SchedulerService
@@ -131,14 +133,21 @@ async def main() -> None:
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
+    # Время последней активности пользователей (in-memory): используется
+    # планировщиком для откладывания дайджеста при недавней активности.
+    activity: dict[int, datetime] = {}
+
     scheduler = AsyncIOScheduler(timezone=pytz.utc)
-    scheduler_service = SchedulerService(scheduler, bot, session_factory)
+    scheduler_service = SchedulerService(
+        scheduler, bot, session_factory, storage, activity
+    )
 
     # Проброс зависимостей в хендлеры через workflow_data.
     dp["config"] = config
     dp["scheduler"] = scheduler_service
 
-    # Middlewares (outer на уровне update): сначала сессия, затем регистрация.
+    # Middlewares (outer на уровне update): активность → сессия → регистрация.
+    dp.update.outer_middleware(ActivityMiddleware(activity))
     dp.update.outer_middleware(DatabaseMiddleware(session_factory))
     dp.update.outer_middleware(RegistrationMiddleware())
 

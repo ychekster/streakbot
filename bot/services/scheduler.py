@@ -7,11 +7,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytz
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError
+from aiogram.fsm.storage.base import BaseStorage, StorageKey
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -27,10 +28,16 @@ from bot.database.models import (
     User,
 )
 from bot.database.repository import Repository
+from bot.keyboards.builders import REMOVE_KB
 from bot.utils.validators import escape_md
 
 # Идентификатор глобального задания истечения просроченных логов.
 EXPIRE_JOB_ID = "global_expire_tasks"
+
+# Окно активности: если пользователь взаимодействовал с ботом менее 5 минут
+# назад, отправку дайджеста откладываем на это же время и проверяем снова.
+_ACTIVITY_WINDOW = timedelta(minutes=5)
+_DIGEST_RETRY_DELAY = timedelta(minutes=5)
 
 
 class SchedulerService:
@@ -41,10 +48,14 @@ class SchedulerService:
         scheduler: AsyncIOScheduler,
         bot: Bot,
         session_factory: async_sessionmaker[AsyncSession],
+        storage: BaseStorage,
+        activity: dict[int, datetime],
     ) -> None:
         self.scheduler = scheduler
         self.bot = bot
         self.session_factory = session_factory
+        self.storage = storage          # для сброса FSM-состояния пользователя
+        self.activity = activity         # user_id -> время последней активности (UTC)
 
     # ------------------------------------------------------------------ #
     #  Жизненный цикл
@@ -175,10 +186,35 @@ class SchedulerService:
     #  Отправка уведомлений
     # ------------------------------------------------------------------ #
 
-    async def _safe_send(self, user_id: int, text: str) -> None:
+    def _is_recently_active(self, user_id: int) -> bool:
+        """Был ли пользователь активен менее _ACTIVITY_WINDOW назад."""
+        last = self.activity.get(user_id)
+        if last is None:
+            return False
+        return datetime.now(timezone.utc) - last < _ACTIVITY_WINDOW
+
+    def _postpone_digest(self, func, user_id: int, job_prefix: str) -> None:
+        """Отложить отправку дайджеста на _DIGEST_RETRY_DELAY (повторная проверка)."""
+        run_at = datetime.now(timezone.utc) + _DIGEST_RETRY_DELAY
+        self.scheduler.add_job(
+            func,
+            trigger=DateTrigger(run_date=run_at),
+            id=f"{job_prefix}_retry_{user_id}",
+            replace_existing=True,
+            args=[user_id],
+        )
+        logger.info("Digest for user {} postponed 5 min (recent activity)", user_id)
+
+    async def _reset_user_state(self, user_id: int) -> None:
+        """Сбросить FSM-состояние и данные пользователя (приватный чат)."""
+        key = StorageKey(bot_id=self.bot.id, chat_id=user_id, user_id=user_id)
+        await self.storage.set_state(key, None)
+        await self.storage.set_data(key, {})
+
+    async def _safe_send(self, user_id: int, text: str, reply_markup=None) -> None:
         """Отправить сообщение, обработав блокировку бота пользователем."""
         try:
-            await self.bot.send_message(user_id, text)
+            await self.bot.send_message(user_id, text, reply_markup=reply_markup)
         except TelegramForbiddenError:
             logger.info("User {} blocked the bot — marking inactive", user_id)
             async with self.session_factory() as session:
@@ -189,22 +225,42 @@ class SchedulerService:
             logger.error("Failed to send message to {}: {}", user_id, exc)
 
     async def send_morning_digest(self, user_id: int) -> None:
-        """Утренний дайджест: задачи на сегодня + блок просроченных + pending-логи."""
+        """Утренний дайджест: задачи на сегодня + блок просроченных + pending-логи.
+
+        Если пользователь активен (<5 мин) — откладываем на 5 минут. Перед
+        отправкой сбрасываем FSM-состояние и убираем reply-клавиатуру (или
+        показываем inline-кнопку «Отметить вчерашние задачи», если есть
+        просроченные).
+        """
         # Ленивый импорт, чтобы избежать цикла импорта с хендлерами.
         from bot.handlers.today import build_morning_digest
+
+        if self._is_recently_active(user_id):
+            self._postpone_digest(self.send_morning_digest, user_id, "morning")
+            return
 
         async with self.session_factory() as session:
             repo = Repository(session)
             user = await repo.get_user(user_id)
             if user is None or not user.is_active:
                 return
-            text = await build_morning_digest(repo, user)
+            text, keyboard = await build_morning_digest(repo, user)
             await session.commit()
-        await self._safe_send(user_id, text)
+
+        await self._reset_user_state(user_id)
+        await self._safe_send(user_id, text, reply_markup=keyboard or REMOVE_KB)
         logger.info("Morning digest sent to user {}", user_id)
 
     async def send_evening_digest(self, user_id: int) -> None:
-        """Вечерний итог: выполненные против оставшихся."""
+        """Вечерний итог: выполненные против оставшихся.
+
+        Та же логика откладывания при активности и сброса состояния, что и у
+        утреннего дайджеста; reply-клавиатура убирается.
+        """
+        if self._is_recently_active(user_id):
+            self._postpone_digest(self.send_evening_digest, user_id, "evening")
+            return
+
         async with self.session_factory() as session:
             repo = Repository(session)
             user = await repo.get_user(user_id)
@@ -215,7 +271,9 @@ class SchedulerService:
             logs = await repo.get_logs_for_date(user_id, today)
             text = await self._render_evening(repo, logs)
             await session.commit()
-        await self._safe_send(user_id, text)
+
+        await self._reset_user_state(user_id)
+        await self._safe_send(user_id, text, reply_markup=REMOVE_KB)
         logger.info("Evening digest sent to user {}", user_id)
 
     async def _render_evening(self, repo: Repository, logs: list) -> str:

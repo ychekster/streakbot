@@ -72,6 +72,14 @@ async def stats_paginate(callback: CallbackQuery, repo: Repository) -> None:
         await callback.message.edit_text(escape_md(TEXTS["stats_no_tasks"]))
         await callback.answer()
         return
+    # Кнопки «‹ Назад»/«Далее ›» есть всегда — на краях показываем alert.
+    total_pages = max(1, (len(tasks) + STATS_PAGE_SIZE - 1) // STATS_PAGE_SIZE)
+    if page < 0:
+        await callback.answer(TEXTS["pagination_first"], show_alert=True)
+        return
+    if page >= total_pages:
+        await callback.answer(TEXTS["pagination_last"], show_alert=True)
+        return
     text, keyboard = await _render_stats(repo, tasks, page)
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
