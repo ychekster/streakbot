@@ -20,14 +20,15 @@ from aiogram.types import (
 
 from bot.constants import (
     BTN_ADD_TASK,
-    BTN_BACK,
     BTN_CONFIRM,
     BTN_DELETE,
     BTN_DONE,
     BTN_DONE_MARK,
+    BTN_DONE_REMINDER,
     BTN_FREQ_DAILY,
     BTN_FREQ_ONETIME,
     BTN_FREQ_SPECIFIC,
+    BTN_MARK_EVENING,
     BTN_MARK_OVERDUE,
     BTN_NAV_NEXT,
     BTN_NAV_PREV,
@@ -301,36 +302,16 @@ def _truncate(name: str) -> str:
     return name[: _BUTTON_NAME_LIMIT - 1].rstrip() + "…"
 
 
-def _pagination_row(page: int, total_pages: int, prefix: str) -> list[InlineKeyboardButton]:
-    """Собрать навигационный ряд: «‹ Назад» «Страница X из N» «Далее ›».
-
-    На первой странице нет «‹ Назад», на последней — «Далее ›».
-    """
-    row: list[InlineKeyboardButton] = []
-    if page > 0:
-        row.append(
-            InlineKeyboardButton(text=BTN_NAV_PREV, callback_data=f"{prefix}:{page - 1}")
-        )
-    row.append(
-        InlineKeyboardButton(
-            text=f"Страница {page + 1} из {total_pages}", callback_data="noop"
-        )
-    )
-    if page < total_pages - 1:
-        row.append(
-            InlineKeyboardButton(text=BTN_NAV_NEXT, callback_data=f"{prefix}:{page + 1}")
-        )
-    return row
-
-
 def delete_list_kb(
     tasks: list[tuple[int, str]],
     page: int,
     total_pages: int,
 ) -> InlineKeyboardMarkup:
-    """Список задач для удаления: до 6 кнопок (3×2) + навигация.
+    """Список задач для удаления: до 6 кнопок (3×2) + навигация 2 кнопками.
 
-    `tasks` — пары (id, name) только для текущей страницы.
+    `tasks` — пары (id, name) только для текущей страницы. Навигация — как в
+    статистике: «‹ Назад» и «Далее ›» всегда (когда страниц больше одной),
+    alert на краях обрабатывает хендлер.
     """
     rows: list[list[InlineKeyboardButton]] = []
     for i in range(0, len(tasks), 2):
@@ -344,20 +325,29 @@ def delete_list_kb(
             ]
         )
     if total_pages > 1:
-        rows.append(_pagination_row(page, total_pages, "task_page"))
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=BTN_NAV_PREV, callback_data=f"task_page:{page - 1}"
+                ),
+                InlineKeyboardButton(
+                    text=BTN_NAV_NEXT, callback_data=f"task_page:{page + 1}"
+                ),
+            ]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def delete_confirm_kb(task_id: int) -> InlineKeyboardMarkup:
-    """Подтверждение удаления: Удалить / Назад."""
+    """Подтверждение удаления: «🗑 Удалить», затем «‹ Назад» отдельной строкой."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text=BTN_DELETE, callback_data=f"task_delete_confirm:{task_id}"
-                ),
-                InlineKeyboardButton(text=BTN_BACK, callback_data="task_delete_cancel"),
-            ]
+                )
+            ],
+            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="task_delete_cancel")],
         ]
     )
 
@@ -385,7 +375,10 @@ def stats_nav_kb(page: int, total_pages: int) -> InlineKeyboardMarkup | None:
 
 
 # --------------------------------------------------------------------------- #
-#  Inline-клавиатуры интерактивного утреннего дайджеста (отметка вчерашних)
+#  Inline-клавиатуры интерактивной отметки задач (утренний/вечерний дайджест)
+#
+#  Клавиатуры параметризованы префиксом callback-data: "md" — утренний дайджест
+#  (вчерашние просроченные), "ed" — вечерний дайджест (сегодняшние невыполненные).
 # --------------------------------------------------------------------------- #
 
 _CHECK_ON = "☑️"
@@ -401,16 +394,26 @@ def morning_overdue_kb() -> InlineKeyboardMarkup:
     )
 
 
-def overdue_select_kb(
+def evening_mark_kb() -> InlineKeyboardMarkup:
+    """Кнопка «Отметить выполненные» на вечернем дайджесте."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=BTN_MARK_EVENING, callback_data="ed_mark")]
+        ]
+    )
+
+
+def task_select_kb(
     items: list[tuple[int, str]],
     selected: set[int],
     page: int,
+    prefix: str,
 ) -> InlineKeyboardMarkup:
-    """Выбор вчерашних задач с галочками + «Готово» + «‹ Назад».
+    """Выбор задач с галочками + «Готово» + «‹ Назад».
 
     До 6 задач — ряды по 2 (без пагинации). Больше — 4 на странице (2 ряда)
     и ряд пагинации «‹ Назад» / «Далее ›» (alert на краях). Затем ряд «Готово»
-    и ряд «‹ Назад» (к дайджесту).
+    и отдельной строкой «‹ Назад» (к дайджесту).
     """
     nav_row: list[InlineKeyboardButton] = []
     if len(items) <= OVERDUE_NO_PAGE_MAX:
@@ -421,42 +424,60 @@ def overdue_select_kb(
         start = page * OVERDUE_PAGE_SIZE
         page_items = items[start : start + OVERDUE_PAGE_SIZE]
         nav_row = [
-            InlineKeyboardButton(text=BTN_NAV_PREV, callback_data=f"md_page:{page - 1}"),
-            InlineKeyboardButton(text=BTN_NAV_NEXT, callback_data=f"md_page:{page + 1}"),
+            InlineKeyboardButton(
+                text=BTN_NAV_PREV, callback_data=f"{prefix}_page:{page - 1}"
+            ),
+            InlineKeyboardButton(
+                text=BTN_NAV_NEXT, callback_data=f"{prefix}_page:{page + 1}"
+            ),
         ]
 
     buttons = [
         InlineKeyboardButton(
             text=f"{_CHECK_ON if task_id in selected else _CHECK_OFF} {_truncate(name)}",
-            callback_data=f"md_toggle:{task_id}",
+            callback_data=f"{prefix}_toggle:{task_id}",
         )
         for task_id, name in page_items
     ]
     rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
     if nav_row:
         rows.append(nav_row)
-    rows.append([InlineKeyboardButton(text=BTN_DONE, callback_data="md_done")])
-    rows.append([InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="md_back_digest")])
+    rows.append([InlineKeyboardButton(text=BTN_DONE, callback_data=f"{prefix}_done")])
+    rows.append(
+        [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data=f"{prefix}_back_digest")]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def overdue_confirm_kb() -> InlineKeyboardMarkup:
-    """Экран подтверждения: «Подтвердить» / «‹ Назад» (к выбору)."""
+def select_confirm_kb(prefix: str) -> InlineKeyboardMarkup:
+    """Экран подтверждения: «Подтвердить», затем «‹ Назад» отдельной строкой."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text=BTN_CONFIRM, callback_data="md_confirm"),
-                InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="md_back_select"),
-            ]
+            [InlineKeyboardButton(text=BTN_CONFIRM, callback_data=f"{prefix}_confirm")],
+            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data=f"{prefix}_back_select")],
         ]
     )
 
 
 def overdue_expired_kb() -> InlineKeyboardMarkup:
-    """Экран «время вышло»: единственная кнопка «Подтвердить»."""
+    """Экран «время вышло» (утренний дайджест): единственная кнопка «Подтвердить»."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=BTN_CONFIRM, callback_data="md_expired_ok")]
+        ]
+    )
+
+
+def reminder_kb(task_id: int, target_date: date) -> InlineKeyboardMarkup:
+    """Кнопка «Выполнена» на сообщении-напоминании (с датой в callback-data)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=BTN_DONE_REMINDER,
+                    callback_data=f"rem_done:{task_id}:{target_date.isoformat()}",
+                )
+            ]
         ]
     )
 

@@ -128,7 +128,7 @@ async def cmd_add(message: Message, state: FSMContext) -> None:
 # --------------------------------------------------------------------------- #
 
 @router.message(AddTaskStates.name, ~Command(*COMMANDS))
-async def add_name(message: Message, state: FSMContext) -> None:
+async def add_name(message: Message, state: FSMContext, repo: Repository) -> None:
     """Принять название задачи и перейти к выбору частоты."""
     if not message.text:
         await message.answer(escape_md(TEXTS["add_task_name_invalid"]))
@@ -139,6 +139,10 @@ async def add_name(message: Message, state: FSMContext) -> None:
         return
     if len(name) > _NAME_MAX_LEN:
         await message.answer(escape_md(TEXTS["add_task_name_too_long"]))
+        return
+    # Запрет дубликатов: задача с таким именем (без учёта регистра) уже есть.
+    if await repo.task_name_exists(message.from_user.id, name):
+        await message.answer(escape_md(TEXTS["add_task_name_duplicate"]))
         return
 
     await state.update_data(name=name)

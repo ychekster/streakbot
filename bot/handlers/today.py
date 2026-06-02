@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytz
 from aiogram import F, Router
@@ -32,10 +32,11 @@ from bot.keyboards.builders import (
     REMOVE_KB,
     done_card_kb,
     done_list_kb,
+    evening_mark_kb,
     morning_overdue_kb,
-    overdue_confirm_kb,
     overdue_expired_kb,
-    overdue_select_kb,
+    select_confirm_kb,
+    task_select_kb,
     today_card_kb,
     today_list_kb,
 )
@@ -140,15 +141,17 @@ async def _done_list_message(
     return "\n".join(lines), keyboard
 
 
-async def _overdue_tasks(repo: Repository, user: User, today) -> list[Task]:
-    """Активные задачи, которые были запланированы на вчера и не выполнены.
+async def _tasks_for_date_not_done(
+    repo: Repository,
+    user: User,
+    target_date,
+) -> list[Task]:
+    """Активные задачи с логом за указанную дату и статусом не `done`.
 
-    Просроченная = есть вчерашний лог со статусом не `done` (pending/missed/
-    skipped), а сама задача ещё активна. Включает все типы задач (ежедневные,
-    по дням недели, одноразовые), поэтому отметка влияет и на стрики.
+    Включает все типы задач. Используется для просроченных (вчера) в утреннем
+    дайджесте и для невыполненных (сегодня) в вечернем.
     """
-    yesterday = today - timedelta(days=1)
-    logs = await repo.get_logs_for_date(user.telegram_id, yesterday)
+    logs = await repo.get_logs_for_date(user.telegram_id, target_date)
     tasks: list[Task] = []
     for log in logs:
         if log.status == TaskStatus.done:
@@ -158,6 +161,53 @@ async def _overdue_tasks(repo: Repository, user: User, today) -> list[Task]:
             tasks.append(task)
     tasks.sort(key=lambda t: t.id)
     return tasks
+
+
+async def _overdue_tasks(repo: Repository, user: User, today) -> list[Task]:
+    """Просроченные = вчерашние невыполненные задачи (любого типа)."""
+    return await _tasks_for_date_not_done(repo, user, today - timedelta(days=1))
+
+
+async def _evening_digest_text(repo: Repository, user: User, today) -> str:
+    """Текст вечернего итога: выполненные против оставшихся за сегодня."""
+    logs = await repo.get_logs_for_date(user.telegram_id, today)
+    if not logs:
+        return escape_md(TEXTS["digest_evening_no_tasks"])
+
+    done, remaining = [], []
+    for log in logs:
+        task = await repo.get_task(log.task_id)
+        if task is None:
+            continue
+        (done if log.status == TaskStatus.done else remaining).append(task.name)
+
+    if not remaining:
+        header = escape_md(TEXTS["digest_evening_header"])
+        return f"{header}\n\n{escape_md(TEXTS['digest_evening_all_done'])}"
+
+    parts = [escape_md(TEXTS["digest_evening_header"]), ""]
+    if done:
+        parts.append(escape_md(TEXTS["digest_evening_done"]))
+        parts.extend(f"• {escape_md(name)}" for name in done)
+        parts.append("")
+    parts.append(escape_md(TEXTS["digest_evening_pending"]))
+    parts.extend(f"• {escape_md(name)}" for name in remaining)
+    return "\n".join(parts)
+
+
+async def build_evening_digest(
+    repo: Repository,
+    user: User,
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Вечерний дайджест: текст итогов + кнопка «Отметить выполненные».
+
+    Кнопка показывается только если есть невыполненные задачи. (текст, клавиатура)
+    """
+    today = datetime.now(_user_tz(user)).date()
+    text = await _evening_digest_text(repo, user, today)
+    remaining = await _tasks_for_date_not_done(repo, user, today)
+    keyboard = evening_mark_kb() if remaining else None
+    return text, keyboard
 
 
 async def build_morning_digest(
@@ -427,7 +477,7 @@ async def md_mark(callback: CallbackQuery, state: FSMContext, repo: Repository) 
     await state.update_data(md_selected=[], md_page=0)
     await callback.message.edit_text(
         _overdue_select_text(overdue),
-        reply_markup=overdue_select_kb([(t.id, t.name) for t in overdue], set(), 0),
+        reply_markup=task_select_kb([(t.id, t.name) for t in overdue], set(), 0, "md"),
     )
     await callback.answer()
 
@@ -450,8 +500,8 @@ async def md_toggle(callback: CallbackQuery, state: FSMContext, repo: Repository
         selected.symmetric_difference_update({task_id})
     await state.update_data(md_selected=list(selected))
     await callback.message.edit_reply_markup(
-        reply_markup=overdue_select_kb(
-            [(t.id, t.name) for t in overdue], selected, page
+        reply_markup=task_select_kb(
+            [(t.id, t.name) for t in overdue], selected, page, "md"
         )
     )
     await callback.answer()
@@ -478,8 +528,8 @@ async def md_page(callback: CallbackQuery, state: FSMContext, repo: Repository) 
     selected = set(data.get("md_selected", []))
     await state.update_data(md_page=page)
     await callback.message.edit_reply_markup(
-        reply_markup=overdue_select_kb(
-            [(t.id, t.name) for t in overdue], selected, page
+        reply_markup=task_select_kb(
+            [(t.id, t.name) for t in overdue], selected, page, "md"
         )
     )
     await callback.answer()
@@ -497,7 +547,7 @@ async def md_done(callback: CallbackQuery, state: FSMContext, repo: Repository) 
     data = await state.get_data()
     selected = set(data.get("md_selected", [])) & {task.id for task in overdue}
     await callback.message.edit_text(
-        _overdue_confirm_text(overdue, selected), reply_markup=overdue_confirm_kb()
+        _overdue_confirm_text(overdue, selected), reply_markup=select_confirm_kb("md")
     )
     await callback.answer()
 
@@ -528,7 +578,7 @@ async def md_back_select(callback: CallbackQuery, state: FSMContext, repo: Repos
     page = data.get("md_page", 0)
     await callback.message.edit_text(
         _overdue_select_text(overdue),
-        reply_markup=overdue_select_kb([(t.id, t.name) for t in overdue], selected, page),
+        reply_markup=task_select_kb([(t.id, t.name) for t in overdue], selected, page, "md"),
     )
     await callback.answer()
 
@@ -582,4 +632,222 @@ async def md_expired_ok(callback: CallbackQuery, repo: Repository) -> None:
     user = await repo.get_user(callback.from_user.id)
     text = await _morning_final_text(repo, user)
     await callback.message.edit_text(text, reply_markup=None)
+    await callback.answer()
+
+
+# --------------------------------------------------------------------------- #
+#  Интерактивный вечерний дайджест: отметка выполненных сегодня задач
+#
+#  Аналог утреннего флоу (префикс callback-data "ed"), но: дедлайна нет,
+#  предупреждения о сгорании нет, «Подтвердить» помечает выбранные как
+#  выполненные (невыбранные не трогает) и возвращает к дайджесту с сохранённой
+#  кнопкой — процесс можно повторить.
+# --------------------------------------------------------------------------- #
+
+def _evening_confirm_text(remaining: list[Task], selected: set[int]) -> str:
+    """Экран подтверждения вечернего дайджеста (без предупреждения о сгорании)."""
+    marked = [task for task in remaining if task.id in selected]
+    unmarked = [task for task in remaining if task.id not in selected]
+    parts = [escape_md(TEXTS["evening_confirm_header"]), ""]
+    if marked:
+        parts.append(escape_md(TEXTS["evening_confirm_marked"]))
+        parts.extend(f"• {escape_md(task.name)}" for task in marked)
+        parts.append("")
+    if unmarked:
+        parts.append(escape_md(TEXTS["evening_confirm_unmarked"]))
+        parts.extend(f"• {escape_md(task.name)}" for task in unmarked)
+        parts.append("")
+    if not marked:
+        parts.append(escape_md(TEXTS["evening_confirm_none_marked"]))
+    return "\n".join(parts).rstrip()
+
+
+@router.callback_query(F.data == "ed_mark")
+async def ed_mark(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
+    """«Отметить выполненные» — добавить абзац и показать экран выбора."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    user = await repo.get_user(callback.from_user.id)
+    today = datetime.now(_user_tz(user)).date()
+    remaining = await _tasks_for_date_not_done(repo, user, today)
+    if not remaining:
+        await callback.answer(TEXTS["evening_nothing"], show_alert=True)
+        text, keyboard = await build_evening_digest(repo, user)
+        await callback.message.edit_text(text, reply_markup=keyboard)
+        return
+    await state.update_data(ed_selected=[], ed_page=0)
+    digest_text = await _evening_digest_text(repo, user, today)
+    text = f"{digest_text}\n\n{escape_md(TEXTS['evening_select_prompt'])}"
+    await callback.message.edit_text(
+        text,
+        reply_markup=task_select_kb([(t.id, t.name) for t in remaining], set(), 0, "ed"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ed_toggle:"))
+async def ed_toggle(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
+    """Переключить галочку на задаче (меняем только клавиатуру)."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    task_id = int(callback.data.split(":", 1)[1])
+    user = await repo.get_user(callback.from_user.id)
+    today = datetime.now(_user_tz(user)).date()
+    remaining = await _tasks_for_date_not_done(repo, user, today)
+    remaining_ids = {task.id for task in remaining}
+    data = await state.get_data()
+    selected = set(data.get("ed_selected", [])) & remaining_ids
+    page = data.get("ed_page", 0)
+    if task_id in remaining_ids:
+        selected.symmetric_difference_update({task_id})
+    await state.update_data(ed_selected=list(selected))
+    await callback.message.edit_reply_markup(
+        reply_markup=task_select_kb(
+            [(t.id, t.name) for t in remaining], selected, page, "ed"
+        )
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ed_page:"))
+async def ed_page(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
+    """Пагинация списка невыполненных задач (alert на краях)."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    page = int(callback.data.split(":", 1)[1])
+    user = await repo.get_user(callback.from_user.id)
+    today = datetime.now(_user_tz(user)).date()
+    remaining = await _tasks_for_date_not_done(repo, user, today)
+    total_pages = max(1, (len(remaining) + OVERDUE_PAGE_SIZE - 1) // OVERDUE_PAGE_SIZE)
+    if page < 0:
+        await callback.answer(TEXTS["pagination_first"], show_alert=True)
+        return
+    if page >= total_pages:
+        await callback.answer(TEXTS["pagination_last"], show_alert=True)
+        return
+    data = await state.get_data()
+    selected = set(data.get("ed_selected", []))
+    await state.update_data(ed_page=page)
+    await callback.message.edit_reply_markup(
+        reply_markup=task_select_kb(
+            [(t.id, t.name) for t in remaining], selected, page, "ed"
+        )
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ed_done")
+async def ed_done(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
+    """«Готово» — показать экран подтверждения (без предупреждения о сгорании)."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    user = await repo.get_user(callback.from_user.id)
+    today = datetime.now(_user_tz(user)).date()
+    remaining = await _tasks_for_date_not_done(repo, user, today)
+    data = await state.get_data()
+    selected = set(data.get("ed_selected", [])) & {task.id for task in remaining}
+    await callback.message.edit_text(
+        _evening_confirm_text(remaining, selected), reply_markup=select_confirm_kb("ed")
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ed_back_digest")
+async def ed_back_digest(callback: CallbackQuery, repo: Repository) -> None:
+    """«‹ Назад» (с выбора) — вернуть вечерний дайджест."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    user = await repo.get_user(callback.from_user.id)
+    text, keyboard = await build_evening_digest(repo, user)
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ed_back_select")
+async def ed_back_select(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
+    """«‹ Назад» (с подтверждения) — вернуть экран выбора (галочки сохраняются)."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    user = await repo.get_user(callback.from_user.id)
+    today = datetime.now(_user_tz(user)).date()
+    remaining = await _tasks_for_date_not_done(repo, user, today)
+    data = await state.get_data()
+    selected = set(data.get("ed_selected", [])) & {task.id for task in remaining}
+    page = data.get("ed_page", 0)
+    digest_text = await _evening_digest_text(repo, user, today)
+    text = f"{digest_text}\n\n{escape_md(TEXTS['evening_select_prompt'])}"
+    await callback.message.edit_text(
+        text,
+        reply_markup=task_select_kb([(t.id, t.name) for t in remaining], selected, page, "ed"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ed_confirm")
+async def ed_confirm(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
+    """«Подтвердить» — пометить выбранные выполненными и вернуть дайджест (кнопка остаётся)."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    user = await repo.get_user(callback.from_user.id)
+    today = datetime.now(_user_tz(user)).date()
+    remaining = await _tasks_for_date_not_done(repo, user, today)
+    data = await state.get_data()
+    selected = set(data.get("ed_selected", [])) & {task.id for task in remaining}
+    for task in remaining:
+        if task.id in selected:
+            log = await repo.get_or_create_log(task.id, user.telegram_id, today)
+            await repo.set_log_status(log, TaskStatus.done)
+    await state.update_data(ed_selected=[], ed_page=0)
+    logger.info("User {} marked {} tasks done via evening digest", user.telegram_id, len(selected))
+    text, keyboard = await build_evening_digest(repo, user)
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+# --------------------------------------------------------------------------- #
+#  Кнопка «Выполнена» на напоминании о задаче
+# --------------------------------------------------------------------------- #
+
+@router.callback_query(F.data.startswith("rem_done:"))
+async def reminder_done(callback: CallbackQuery, repo: Repository) -> None:
+    """Отметить задачу выполненной из напоминания (активно до 12:00 следующего дня)."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    parts = callback.data.split(":")
+    task_id = int(parts[1])
+    target_date = date.fromisoformat(parts[2])
+    user = await repo.get_user(callback.from_user.id)
+    tz = _user_tz(user)
+    now = datetime.now(tz)
+    deadline = tz.localize(datetime.combine(target_date + timedelta(days=1), time(12, 0)))
+    if now >= deadline:
+        await callback.message.edit_text(escape_md(TEXTS["reminder_expired"]))
+        await callback.answer()
+        return
+
+    task = await repo.get_active_task(task_id, callback.from_user.id)
+    if task is None:
+        await callback.message.edit_text(escape_md(TEXTS["reminder_gone"]))
+        await callback.answer()
+        return
+
+    log = await repo.get_or_create_log(task_id, user.telegram_id, target_date)
+    if log.status == TaskStatus.done:
+        await callback.message.edit_text(
+            escape_md(TEXTS["reminder_already_done"].format(name=task.name))
+        )
+    else:
+        await repo.set_log_status(log, TaskStatus.done)
+        await callback.message.edit_text(
+            escape_md(TEXTS["reminder_marked_done"].format(name=task.name))
+        )
+        logger.info("User {} marked task {} done via reminder", user.telegram_id, task_id)
     await callback.answer()

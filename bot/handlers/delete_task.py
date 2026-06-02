@@ -64,6 +64,14 @@ async def delete_paginate(callback: CallbackQuery, state: FSMContext, repo: Repo
         await state.clear()
         await callback.answer()
         return
+    # Кнопки «‹ Назад»/«Далее ›» есть всегда — на краях показываем alert.
+    total_pages = max(1, (len(tasks) + DELETE_PAGE_SIZE - 1) // DELETE_PAGE_SIZE)
+    if page < 0:
+        await callback.answer(TEXTS["pagination_first"], show_alert=True)
+        return
+    if page >= total_pages:
+        await callback.answer(TEXTS["pagination_last"], show_alert=True)
+        return
     page_tasks, total_pages = _paginate(tasks, page)
     await state.update_data(page=page)
     await callback.message.edit_reply_markup(

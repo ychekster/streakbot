@@ -21,23 +21,19 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot.constants import TEXTS
-from bot.database.models import (
-    FrequencyType,
-    Task,
-    TaskStatus,
-    User,
-)
+from bot.database.models import FrequencyType, Task, User
 from bot.database.repository import Repository
-from bot.keyboards.builders import REMOVE_KB
+from bot.keyboards.builders import REMOVE_KB, reminder_kb
 from bot.utils.validators import escape_md
 
 # Идентификатор глобального задания истечения просроченных логов.
 EXPIRE_JOB_ID = "global_expire_tasks"
 
 # Окно активности: если пользователь взаимодействовал с ботом менее 5 минут
-# назад, отправку дайджеста откладываем на это же время и проверяем снова.
+# назад, отправку дайджеста откладываем ровно на остаток до 5 минут и проверяем
+# снова. Максимум 3 отложки — на 4-й итерации уведомление уходит безусловно.
 _ACTIVITY_WINDOW = timedelta(minutes=5)
-_DIGEST_RETRY_DELAY = timedelta(minutes=5)
+_MAX_POSTPONES = 3
 
 
 class SchedulerService:
@@ -50,12 +46,16 @@ class SchedulerService:
         session_factory: async_sessionmaker[AsyncSession],
         storage: BaseStorage,
         activity: dict[int, datetime],
+        digest_sent: dict[tuple[int, str], "date"],
     ) -> None:
         self.scheduler = scheduler
         self.bot = bot
         self.session_factory = session_factory
         self.storage = storage          # для сброса FSM-состояния пользователя
         self.activity = activity         # user_id -> время последней активности (UTC)
+        # (user_id, 'morning'|'evening') -> дата последнего отправленного дайджеста.
+        # Если дайджест за сегодня уже отправлен, смена настроек его не переотправит.
+        self.digest_sent = digest_sent
 
     # ------------------------------------------------------------------ #
     #  Жизненный цикл
@@ -186,24 +186,35 @@ class SchedulerService:
     #  Отправка уведомлений
     # ------------------------------------------------------------------ #
 
-    def _is_recently_active(self, user_id: int) -> bool:
-        """Был ли пользователь активен менее _ACTIVITY_WINDOW назад."""
+    def _maybe_postpone(self, func, user_id: int, prefix: str, attempt: int) -> bool:
+        """Отложить дайджест, если пользователь активен (<5 мин). True — отложили.
+
+        Задержка — ровно остаток до 5 минут от ПОСЛЕДНЕЙ активности (каждый раз
+        пересчитывается заново, отложки не суммируются). Максимум _MAX_POSTPONES
+        отложек; дальше уведомление уходит безусловно.
+        """
+        if attempt >= _MAX_POSTPONES:
+            return False
         last = self.activity.get(user_id)
         if last is None:
             return False
-        return datetime.now(timezone.utc) - last < _ACTIVITY_WINDOW
-
-    def _postpone_digest(self, func, user_id: int, job_prefix: str) -> None:
-        """Отложить отправку дайджеста на _DIGEST_RETRY_DELAY (повторная проверка)."""
-        run_at = datetime.now(timezone.utc) + _DIGEST_RETRY_DELAY
+        gap = datetime.now(timezone.utc) - last
+        if gap >= _ACTIVITY_WINDOW:
+            return False
+        delay = _ACTIVITY_WINDOW - gap
+        run_at = datetime.now(timezone.utc) + delay
         self.scheduler.add_job(
             func,
             trigger=DateTrigger(run_date=run_at),
-            id=f"{job_prefix}_retry_{user_id}",
+            id=f"{prefix}_retry_{user_id}",
             replace_existing=True,
-            args=[user_id],
+            args=[user_id, attempt + 1],
         )
-        logger.info("Digest for user {} postponed 5 min (recent activity)", user_id)
+        logger.info(
+            "Digest '{}' for user {} postponed {:.0f}s (attempt {}/{})",
+            prefix, user_id, delay.total_seconds(), attempt + 1, _MAX_POSTPONES,
+        )
+        return True
 
     async def _reset_user_state(self, user_id: int) -> None:
         """Сбросить FSM-состояние и данные пользователя (приватный чат)."""
@@ -224,85 +235,63 @@ class SchedulerService:
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to send message to {}: {}", user_id, exc)
 
-    async def send_morning_digest(self, user_id: int) -> None:
+    async def send_morning_digest(self, user_id: int, attempt: int = 0) -> None:
         """Утренний дайджест: задачи на сегодня + блок просроченных + pending-логи.
 
-        Если пользователь активен (<5 мин) — откладываем на 5 минут. Перед
-        отправкой сбрасываем FSM-состояние и убираем reply-клавиатуру (или
-        показываем inline-кнопку «Отметить вчерашние задачи», если есть
-        просроченные).
+        Не отправляется повторно, если уже был отправлен сегодня (смена настроек
+        не переотправляет). Откладывается при недавней активности (см.
+        `_maybe_postpone`). Перед отправкой сбрасывает FSM-состояние и убирает
+        reply-клавиатуру (или показывает inline-кнопку отметки просроченных).
         """
         # Ленивый импорт, чтобы избежать цикла импорта с хендлерами.
         from bot.handlers.today import build_morning_digest
-
-        if self._is_recently_active(user_id):
-            self._postpone_digest(self.send_morning_digest, user_id, "morning")
-            return
 
         async with self.session_factory() as session:
             repo = Repository(session)
             user = await repo.get_user(user_id)
             if user is None or not user.is_active:
+                return
+            today = datetime.now(self._user_tz(user)).date()
+            if self.digest_sent.get((user_id, "morning")) == today:
+                return
+            if self._maybe_postpone(self.send_morning_digest, user_id, "morning", attempt):
                 return
             text, keyboard = await build_morning_digest(repo, user)
             await session.commit()
 
         await self._reset_user_state(user_id)
         await self._safe_send(user_id, text, reply_markup=keyboard or REMOVE_KB)
+        self.digest_sent[(user_id, "morning")] = today
         logger.info("Morning digest sent to user {}", user_id)
 
-    async def send_evening_digest(self, user_id: int) -> None:
-        """Вечерний итог: выполненные против оставшихся.
+    async def send_evening_digest(self, user_id: int, attempt: int = 0) -> None:
+        """Вечерний итог + inline-кнопка отметки выполненных.
 
-        Та же логика откладывания при активности и сброса состояния, что и у
-        утреннего дайджеста; reply-клавиатура убирается.
+        Та же логика «не отправлять дважды за день», откладывания и сброса
+        состояния, что и у утреннего дайджеста.
         """
-        if self._is_recently_active(user_id):
-            self._postpone_digest(self.send_evening_digest, user_id, "evening")
-            return
+        from bot.handlers.today import build_evening_digest
 
         async with self.session_factory() as session:
             repo = Repository(session)
             user = await repo.get_user(user_id)
             if user is None or not user.is_active:
                 return
-            tz = self._user_tz(user)
-            today = datetime.now(tz).date()
-            logs = await repo.get_logs_for_date(user_id, today)
-            text = await self._render_evening(repo, logs)
+            today = datetime.now(self._user_tz(user)).date()
+            if self.digest_sent.get((user_id, "evening")) == today:
+                return
+            if self._maybe_postpone(self.send_evening_digest, user_id, "evening", attempt):
+                return
+            text, keyboard = await build_evening_digest(repo, user)
             await session.commit()
 
         await self._reset_user_state(user_id)
-        await self._safe_send(user_id, text, reply_markup=REMOVE_KB)
+        await self._safe_send(user_id, text, reply_markup=keyboard or REMOVE_KB)
+        self.digest_sent[(user_id, "evening")] = today
         logger.info("Evening digest sent to user {}", user_id)
 
-    async def _render_evening(self, repo: Repository, logs: list) -> str:
-        """Собрать текст вечернего итога из логов за день."""
-        if not logs:
-            return escape_md(TEXTS["digest_evening_no_tasks"])
-
-        done, remaining = [], []
-        for log in logs:
-            task = await repo.get_task(log.task_id)
-            if task is None:
-                continue
-            (done if log.status == TaskStatus.done else remaining).append(task.name)
-
-        if not remaining:
-            header = escape_md(TEXTS["digest_evening_header"])
-            return f"{header}\n\n{escape_md(TEXTS['digest_evening_all_done'])}"
-
-        parts = [escape_md(TEXTS["digest_evening_header"]), ""]
-        if done:
-            parts.append(escape_md(TEXTS["digest_evening_done"]))
-            parts.extend(f"• {escape_md(name)}" for name in done)
-            parts.append("")
-        parts.append(escape_md(TEXTS["digest_evening_pending"]))
-        parts.extend(f"• {escape_md(name)}" for name in remaining)
-        return "\n".join(parts)
-
     async def send_reminder(self, task_id: int) -> None:
-        """Отправить напоминание по конкретной задаче."""
+        """Отправить напоминание по конкретной задаче (с кнопкой «Выполнена»)."""
         async with self.session_factory() as session:
             repo = Repository(session)
             task = await repo.get_task(task_id)
@@ -311,9 +300,14 @@ class SchedulerService:
             user = await repo.get_user(task.user_id)
             if user is None or not user.is_active:
                 return
+            if task.frequency_type == FrequencyType.one_time and task.one_time_date:
+                target_date = task.one_time_date
+            else:
+                target_date = datetime.now(self._user_tz(user)).date()
             text = escape_md(TEXTS["reminder_text"].format(name=task.name))
+            keyboard = reminder_kb(task.id, target_date)
             user_id = task.user_id
-        await self._safe_send(user_id, text)
+        await self._safe_send(user_id, text, reply_markup=keyboard)
         logger.info("Reminder sent for task {}", task_id)
 
     async def check_and_expire_tasks(self) -> None:

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pytz
@@ -136,10 +136,13 @@ async def main() -> None:
     # Время последней активности пользователей (in-memory): используется
     # планировщиком для откладывания дайджеста при недавней активности.
     activity: dict[int, datetime] = {}
+    # Факт отправки дайджеста за сегодня: (user_id, 'morning'|'evening') -> дата.
+    # Защищает от повторной отправки при смене настроек времени/пояса.
+    digest_sent: dict[tuple[int, str], date] = {}
 
     scheduler = AsyncIOScheduler(timezone=pytz.utc)
     scheduler_service = SchedulerService(
-        scheduler, bot, session_factory, storage, activity
+        scheduler, bot, session_factory, storage, activity, digest_sent
     )
 
     # Проброс зависимостей в хендлеры через workflow_data.
