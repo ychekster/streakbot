@@ -1,4 +1,8 @@
-"""/stats — статистика и стрики по всем активным задачам (с пагинацией)."""
+"""/stats — статистика и стрики по всем активным задачам (с пагинацией).
+
+Функции `stats_tasks` и `render_stats_page` вынесены как переиспользуемые: их
+применяет раздел «Все задачи» команды /tasks (идентичное /stats отображение).
+"""
 
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ from bot.utils.validators import escape_md
 router = Router(name="stats")
 
 
-async def _stats_tasks(repo: Repository, user_id: int) -> list[Task]:
+async def stats_tasks(repo: Repository, user_id: int) -> list[Task]:
     """Активные задачи для статистики — без одноразовых (они не участвуют в стриках)."""
     return [
         task
@@ -26,12 +30,16 @@ async def _stats_tasks(repo: Repository, user_id: int) -> list[Task]:
     ]
 
 
-async def _render_stats(
+async def render_stats_page(
     repo: Repository,
     tasks: list[Task],
     page: int,
-) -> tuple[str, InlineKeyboardMarkup | None]:
-    """Собрать текст страницы статистики и навигационную клавиатуру."""
+) -> tuple[str, int, int]:
+    """Собрать текст страницы статистики.
+
+    Возвращает (текст, нормализованный номер страницы, всего страниц). Номер
+    страницы нормализуется в диапазон [0, total_pages - 1].
+    """
     total_pages = max(1, (len(tasks) + STATS_PAGE_SIZE - 1) // STATS_PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
     page_tasks = tasks[page * STATS_PAGE_SIZE : (page + 1) * STATS_PAGE_SIZE]
@@ -44,7 +52,16 @@ async def _render_stats(
         lines.append(f"🔥 {escape_md(f'Текущий стрик: {current} дней')}")
         lines.append(f"🏆 {escape_md(f'Лучший стрик: {best} дней')}")
         lines.append("")
-    text = "\n".join(lines).rstrip()
+    return "\n".join(lines).rstrip(), page, total_pages
+
+
+async def _render_stats(
+    repo: Repository,
+    tasks: list[Task],
+    page: int,
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Текст страницы статистики + навигационная клавиатура /stats."""
+    text, page, total_pages = await render_stats_page(repo, tasks, page)
     return text, stats_nav_kb(page, total_pages)
 
 
@@ -52,7 +69,7 @@ async def _render_stats(
 async def cmd_stats(message: Message, state: FSMContext, repo: Repository) -> None:
     """Показать статистику."""
     await state.clear()
-    tasks = await _stats_tasks(repo, message.from_user.id)
+    tasks = await stats_tasks(repo, message.from_user.id)
     if not tasks:
         await message.answer(escape_md(TEXTS["stats_no_tasks"]), reply_markup=REMOVE_KB)
         return
@@ -67,7 +84,7 @@ async def stats_paginate(callback: CallbackQuery, repo: Repository) -> None:
         await callback.answer()
         return
     page = int(callback.data.split(":", 1)[1])
-    tasks = await _stats_tasks(repo, callback.from_user.id)
+    tasks = await stats_tasks(repo, callback.from_user.id)
     if not tasks:
         await callback.message.edit_text(escape_md(TEXTS["stats_no_tasks"]))
         await callback.answer()

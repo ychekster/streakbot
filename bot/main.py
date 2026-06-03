@@ -34,6 +34,7 @@ from bot.handlers import (
     settings,
     start,
     stats,
+    tasks,
     today,
 )
 from bot.middlewares.activity import ActivityMiddleware
@@ -74,6 +75,7 @@ def register_routers(dp: Dispatcher) -> None:
     dp.include_router(delete_task.router)
     dp.include_router(edit_task.router)
     dp.include_router(stats.router)
+    dp.include_router(tasks.router)
     dp.include_router(settings.router)
 
 
@@ -101,6 +103,7 @@ def register_error_handler(dp: Dispatcher) -> None:
 async def set_bot_commands(bot: Bot) -> None:
     """Зарегистрировать меню команд бота в Telegram (не критично при сбое)."""
     commands = [
+        BotCommand(command="tasks", description="Задачи: все и на сегодня"),
         BotCommand(command="add", description="Добавить задачу"),
         BotCommand(command="edit", description="Редактировать задачу"),
         BotCommand(command="delete", description="Удалить задачу"),

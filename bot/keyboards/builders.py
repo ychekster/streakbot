@@ -20,6 +20,8 @@ from aiogram.types import (
 
 from bot.constants import (
     BTN_ADD_TASK,
+    BTN_ARROW_NEXT,
+    BTN_ARROW_PREV,
     BTN_CONFIRM,
     BTN_DELETE,
     BTN_DONE,
@@ -46,6 +48,8 @@ from bot.constants import (
     BTN_SETTINGS_TIMEZONE,
     BTN_SKIP,
     BTN_START,
+    BTN_TASKS_ALL,
+    BTN_TASKS_TODAY,
     BTN_TODAY_BACK,
     BTN_YES,
     DELETE_PAGE_SIZE,
@@ -306,6 +310,46 @@ def stats_nav_kb(page: int, total_pages: int) -> InlineKeyboardMarkup | None:
             ]
         ]
     )
+
+
+# --------------------------------------------------------------------------- #
+#  Inline-клавиатуры просмотра задач (/tasks)
+#
+#  Меню с двумя пунктами; всё взаимодействие — в рамках одного сообщения.
+#  «Задачи на сегодня» переиспользует общий флоу отметки (`tm_mark:tasks`),
+#  «Все задачи» — отображение, идентичное /stats, со стрелочной пагинацией.
+# --------------------------------------------------------------------------- #
+
+def tasks_menu_kb() -> InlineKeyboardMarkup:
+    """Меню /tasks: «Все задачи» и «Задачи на сегодня» (каждая — отдельной строкой)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=BTN_TASKS_ALL, callback_data="tasks_all")],
+            [InlineKeyboardButton(text=BTN_TASKS_TODAY, callback_data="tm_mark:tasks")],
+        ]
+    )
+
+
+def tasks_all_kb(page: int, total_pages: int) -> InlineKeyboardMarkup:
+    """Раздел «Все задачи»: стрелочная пагинация «‹»/«›» + «‹ Назад» (к меню /tasks).
+
+    Стрелки показываются только при нескольких страницах (alert на краях — в
+    хендлере); «‹ Назад» — всегда отдельной строкой внизу.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if total_pages > 1:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=BTN_ARROW_PREV, callback_data=f"tasks_all_page:{page - 1}"
+                ),
+                InlineKeyboardButton(
+                    text=BTN_ARROW_NEXT, callback_data=f"tasks_all_page:{page + 1}"
+                ),
+            ]
+        )
+    rows.append([InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="tasks_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # --------------------------------------------------------------------------- #

@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
@@ -191,9 +191,15 @@ async def edit_pick(callback: CallbackQuery, state: FSMContext, repo: Repository
 #  Навигация карточки: назад к задаче / назад к списку
 # --------------------------------------------------------------------------- #
 
-@router.callback_query(F.data == "edit_to_card")
+@router.callback_query(StateFilter(EditTaskStates), F.data == "edit_to_card")
 async def edit_to_card(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """«‹ Вернуться к задаче» / «‹ Назад» — отрисовать карточку в текущем сообщении."""
+    """«‹ Вернуться к задаче» / «‹ Назад» — отрисовать карточку в текущем сообщении.
+
+    Хендлер ограничен состояниями редактирования: иначе нажатие на «устаревшей»
+    кнопке возврата (из сообщения об успешном изменении), пока пользователь уже в
+    другом сценарии (например, в /delete), сбрасывало бы чужой FSM через
+    `_render_card` и ломало активную команду.
+    """
     if callback.message is None:
         await callback.answer()
         return
