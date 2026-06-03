@@ -23,7 +23,6 @@ from bot.constants import (
     BTN_CONFIRM,
     BTN_DELETE,
     BTN_DONE,
-    BTN_DONE_MARK,
     BTN_DONE_REMINDER,
     BTN_FREQ_DAILY,
     BTN_FREQ_ONETIME,
@@ -41,7 +40,6 @@ from bot.constants import (
     BTN_SKIP,
     BTN_START,
     BTN_TODAY_BACK,
-    BTN_UNDO,
     BTN_YES,
     DELETE_PAGE_SIZE,
     EVENING_TIME_PRESETS,
@@ -130,10 +128,14 @@ def settings_kb() -> ReplyKeyboardMarkup:
 
 # --------------------------------------------------------------------------- #
 #  Inline-клавиатуры добавления задачи
+#
+#  Кнопка «‹ Назад» (отдельной строкой внизу) есть на каждом шаге, кроме первого
+#  после ввода названия (выбор частоты). Нажатие редактирует сообщение и
+#  возвращает к предыдущему шагу — см. хендлеры add_back_* в handlers/add_task.py.
 # --------------------------------------------------------------------------- #
 
 def frequency_kb() -> InlineKeyboardMarkup:
-    """Выбор частоты выполнения задачи."""
+    """Выбор частоты выполнения задачи (первый шаг после названия — без «Назад»)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=BTN_FREQ_DAILY, callback_data="freq:daily")],
@@ -144,149 +146,74 @@ def frequency_kb() -> InlineKeyboardMarkup:
 
 
 def days_kb(selected: set[str]) -> InlineKeyboardMarkup:
-    """Выбор дней недели с галочками + кнопка «Готово»."""
+    """Выбор дней недели с галочками + «Готово» + «‹ Назад» (к выбору частоты)."""
     buttons: list[InlineKeyboardButton] = []
     for code, short, _ in WEEKDAYS:
         mark = "✅ " if code in selected else ""
         buttons.append(
             InlineKeyboardButton(text=f"{mark}{short}", callback_data=f"day:{code}")
         )
-    # Раскладка: 4 + 3 + ряд с «Готово».
-    rows = [buttons[:4], buttons[4:], [
-        InlineKeyboardButton(text=BTN_DONE, callback_data="days_done")
-    ]]
+    # Раскладка: 4 + 3 + ряд «Готово» + ряд «‹ Назад».
+    rows = [
+        buttons[:4],
+        buttons[4:],
+        [InlineKeyboardButton(text=BTN_DONE, callback_data="days_done")],
+        [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="add_back_freq")],
+    ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def year_kb(years: list[int]) -> InlineKeyboardMarkup:
-    """Выбор года (текущий + 2 следующих) одним рядом."""
+    """Выбор года одним рядом + «‹ Назад» (к выбору частоты)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=str(y), callback_data=f"year:{y}") for y in years]
+            [InlineKeyboardButton(text=str(y), callback_data=f"year:{y}") for y in years],
+            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="add_back_freq")],
         ]
     )
 
 
 def month_kb(year: int, min_month: int) -> InlineKeyboardMarkup:
-    """Выбор месяца сеткой 4×3; месяцы раньше min_month не отображаются."""
+    """Выбор месяца сеткой 4×3 + «‹ Назад» (к выбору года); прошедшие месяцы скрыты."""
     buttons = [
         InlineKeyboardButton(text=MONTHS_SHORT[m], callback_data=f"month:{m}")
         for m in range(min_month, 13)
     ]
     rows = [buttons[i : i + 4] for i in range(0, len(buttons), 4)]
+    rows.append([InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="add_back_to_year")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def day_kb(year: int, month: int, min_day: int) -> InlineKeyboardMarkup:
-    """Выбор дня сеткой по 7; дни раньше min_day не отображаются."""
+    """Выбор дня сеткой по 7 + «‹ Назад» (к выбору месяца); прошедшие дни скрыты."""
     days_in_month = calendar.monthrange(year, month)[1]
     buttons = [
         InlineKeyboardButton(text=str(d), callback_data=f"dateday:{d}")
         for d in range(min_day, days_in_month + 1)
     ]
     rows = [buttons[i : i + 7] for i in range(0, len(buttons), 7)]
+    rows.append([InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="add_back_to_month")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def has_reminder_kb() -> InlineKeyboardMarkup:
-    """Спросить, есть ли фиксированное время напоминания."""
+    """Вопрос про фиксированное время напоминания + «‹ Назад» (к предыдущему шагу)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text=BTN_REMINDER_YES, callback_data="rem:yes"),
                 InlineKeyboardButton(text=BTN_REMINDER_NO, callback_data="rem:no"),
-            ]
-        ]
-    )
-
-
-# --------------------------------------------------------------------------- #
-#  Inline-клавиатуры списка и карточки задачи (/today, /done)
-# --------------------------------------------------------------------------- #
-
-# Сетка кнопок: до 8 задач — без пагинации (ряды по 2); больше — по 6 на странице
-# (3 ряда по 2) + навигационный ряд «‹ Назад» / «Далее ›».
-_GRID_NO_PAGE_MAX = 8
-_GRID_PAGE_SIZE = 6
-
-
-def _task_grid(
-    items: list[tuple[int, str]],
-    page: int,
-    open_prefix: str,
-    page_prefix: str,
-) -> InlineKeyboardMarkup:
-    """Сетка кнопок-задач (по 2 в ряд) с опциональной пагинацией.
-
-    Нумерация кнопок сквозная (с учётом страницы) и совпадает с нумерацией в
-    тексте сообщения.
-    """
-    total = len(items)
-    nav_row: list[InlineKeyboardButton] = []
-    if total <= _GRID_NO_PAGE_MAX:
-        start = 0
-        page_items = items
-    else:
-        total_pages = (total + _GRID_PAGE_SIZE - 1) // _GRID_PAGE_SIZE
-        page = max(0, min(page, total_pages - 1))
-        start = page * _GRID_PAGE_SIZE
-        page_items = items[start : start + _GRID_PAGE_SIZE]
-        if page > 0:
-            nav_row.append(
-                InlineKeyboardButton(
-                    text=BTN_NAV_PREV, callback_data=f"{page_prefix}:{page - 1}"
-                )
-            )
-        if page < total_pages - 1:
-            nav_row.append(
-                InlineKeyboardButton(
-                    text=BTN_NAV_NEXT, callback_data=f"{page_prefix}:{page + 1}"
-                )
-            )
-
-    buttons = [
-        InlineKeyboardButton(
-            text=f"{start + i + 1}. {_truncate(name)}",
-            callback_data=f"{open_prefix}:{task_id}",
-        )
-        for i, (task_id, name) in enumerate(page_items)
-    ]
-    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
-    if nav_row:
-        rows.append(nav_row)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def today_list_kb(active: list[tuple[int, str]], page: int = 0) -> InlineKeyboardMarkup:
-    """Список /today: кнопки только для невыполненных задач (сетка + пагинация)."""
-    return _task_grid(active, page, "today_open", "today_page")
-
-
-def done_list_kb(completed: list[tuple[int, str]], page: int = 0) -> InlineKeyboardMarkup:
-    """Список /done: кнопки выполненных задач (сетка + пагинация)."""
-    return _task_grid(completed, page, "done_open", "done_page")
-
-
-def today_card_kb(task_id: int) -> InlineKeyboardMarkup:
-    """Карточка задачи из /today: «✅ Выполнено» и «‹ Назад» (к списку)."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=BTN_DONE_MARK, callback_data=f"today_done:{task_id}"
-                )
             ],
-            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="today_back_list")],
+            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="add_back_from_reminder")],
         ]
     )
 
 
-def done_card_kb(task_id: int) -> InlineKeyboardMarkup:
-    """Карточка задачи из /done: «Отменить выполнение» и «‹ Назад» (к списку)."""
+def reminder_time_back_kb() -> InlineKeyboardMarkup:
+    """Экран ввода времени напоминания: только «‹ Назад» (к вопросу о напоминании)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=BTN_UNDO, callback_data=f"done_undo:{task_id}")],
-            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="done_back_list")],
+            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="add_back_to_reminder")]
         ]
     )
 
@@ -377,8 +304,11 @@ def stats_nav_kb(page: int, total_pages: int) -> InlineKeyboardMarkup | None:
 # --------------------------------------------------------------------------- #
 #  Inline-клавиатуры интерактивной отметки задач (утренний/вечерний дайджест)
 #
-#  Клавиатуры параметризованы префиксом callback-data: "md" — утренний дайджест
-#  (вчерашние просроченные), "ed" — вечерний дайджест (сегодняшние невыполненные).
+#  Дайджест несёт inline-кнопку отметки (morning_overdue_kb / evening_mark_kb).
+#  По нажатию текущее сообщение редактируется в экран выбора задач — всё
+#  взаимодействие идёт в рамках одного сообщения, новых сообщений не отправляется.
+#  Inline-выбор параметризован префиксом callback-data: "md" — утро (вчерашние
+#  просроченные), "ed" — вечер (сегодняшние невыполненные).
 # --------------------------------------------------------------------------- #
 
 _CHECK_ON = "☑️"
@@ -386,7 +316,7 @@ _CHECK_OFF = "⬜"
 
 
 def morning_overdue_kb() -> InlineKeyboardMarkup:
-    """Кнопка «Отметить вчерашние задачи» на утреннем дайджесте."""
+    """Inline-кнопка «Отметить вчерашние задачи» под утренним дайджестом."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=BTN_MARK_OVERDUE, callback_data="md_mark")]
@@ -395,7 +325,7 @@ def morning_overdue_kb() -> InlineKeyboardMarkup:
 
 
 def evening_mark_kb() -> InlineKeyboardMarkup:
-    """Кнопка «Отметить выполненные» на вечернем дайджесте."""
+    """Inline-кнопка «Отметить выполненные» под вечерним итогом."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=BTN_MARK_EVENING, callback_data="ed_mark")]

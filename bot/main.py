@@ -99,8 +99,6 @@ def register_error_handler(dp: Dispatcher) -> None:
 async def set_bot_commands(bot: Bot) -> None:
     """Зарегистрировать меню команд бота в Telegram (не критично при сбое)."""
     commands = [
-        BotCommand(command="today", description="Задачи на сегодня"),
-        BotCommand(command="done", description="Выполненные за сегодня"),
         BotCommand(command="add", description="Добавить задачу"),
         BotCommand(command="delete", description="Удалить задачу"),
         BotCommand(command="stats", description="Статистика и стрики"),
