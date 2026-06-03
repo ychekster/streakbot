@@ -173,19 +173,56 @@ class Repository:
         await self.session.flush()
         return task
 
-    async def task_name_exists(self, user_id: int, name: str) -> bool:
+    async def task_name_exists(
+        self,
+        user_id: int,
+        name: str,
+        exclude_task_id: int | None = None,
+    ) -> bool:
         """Есть ли у пользователя активная задача с таким именем (без учёта регистра).
 
         Сравнение делается в Python: SQLite `lower()` не приводит к нижнему
-        регистру кириллицу, поэтому полагаться на него нельзя.
+        регистру кириллицу, поэтому полагаться на него нельзя. `exclude_task_id`
+        исключает саму редактируемую задачу из проверки (для /edit).
         """
         target = name.strip().lower()
         result = await self.session.execute(
-            select(Task.name).where(
+            select(Task.id, Task.name).where(
                 Task.user_id == user_id, Task.is_active.is_(True)
             )
         )
-        return any((n or "").strip().lower() == target for n in result.scalars().all())
+        for task_id, task_name in result.all():
+            if exclude_task_id is not None and task_id == exclude_task_id:
+                continue
+            if (task_name or "").strip().lower() == target:
+                return True
+        return False
+
+    async def update_task_name(self, task: Task, name: str) -> None:
+        """Изменить название задачи (для /edit)."""
+        task.name = name
+        await self.session.flush()
+
+    async def update_task_frequency(
+        self,
+        task: Task,
+        frequency_type: FrequencyType,
+        days: str | None,
+    ) -> None:
+        """Изменить частоту задачи (для /edit).
+
+        Поддерживаются только `daily` и `specific_days`; `one_time_date`
+        сбрасывается, так как редактирование частоты делает задачу повторяющейся.
+        """
+        task.frequency_type = frequency_type
+        task.days = days
+        task.one_time_date = None
+        await self.session.flush()
+
+    async def update_task_reminder(self, task: Task, reminder_time: time | None) -> None:
+        """Установить или убрать (None) время напоминания задачи (для /edit)."""
+        task.reminder_time = reminder_time
+        await self.session.flush()
 
     async def get_task(self, task_id: int) -> Task | None:
         """Вернуть задачу по id (без фильтра активности)."""

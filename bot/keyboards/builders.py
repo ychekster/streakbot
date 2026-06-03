@@ -24,6 +24,9 @@ from bot.constants import (
     BTN_DELETE,
     BTN_DONE,
     BTN_DONE_REMINDER,
+    BTN_EDIT_FREQ,
+    BTN_EDIT_NAME,
+    BTN_EDIT_REMINDER,
     BTN_FREQ_DAILY,
     BTN_FREQ_ONETIME,
     BTN_FREQ_SPECIFIC,
@@ -32,8 +35,11 @@ from bot.constants import (
     BTN_NAV_NEXT,
     BTN_NAV_PREV,
     BTN_NO,
+    BTN_REM_CHANGE,
+    BTN_REM_REMOVE,
     BTN_REMINDER_NO,
     BTN_REMINDER_YES,
+    BTN_RETURN_TASK,
     BTN_SETTINGS_EVENING,
     BTN_SETTINGS_MORNING,
     BTN_SETTINGS_TIMEZONE,
@@ -297,6 +303,111 @@ def stats_nav_kb(page: int, total_pages: int) -> InlineKeyboardMarkup | None:
                     text=BTN_NAV_NEXT, callback_data=f"stats_page:{page + 1}"
                 ),
             ]
+        ]
+    )
+
+
+# --------------------------------------------------------------------------- #
+#  Inline-клавиатуры редактирования задачи (/edit)
+#
+#  Список выбора задачи идентичен /delete (callback-data edit_select / edit_page).
+#  Карточка задачи редактируется в рамках одного сообщения; «‹ Назад» ведёт к
+#  предыдущему состоянию этого сообщения (callback edit_to_card / edit_freq_back).
+# --------------------------------------------------------------------------- #
+
+def edit_list_kb(
+    tasks: list[tuple[int, str]],
+    page: int,
+    total_pages: int,
+) -> InlineKeyboardMarkup:
+    """Список задач для редактирования: до 6 кнопок (3×2) + навигация 2 кнопками.
+
+    Полностью повторяет раскладку `delete_list_kb`, но с callback-data
+    `edit_select:{id}` / `edit_page:{page}`.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(tasks), 2):
+        chunk = tasks[i : i + 2]
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=_truncate(name), callback_data=f"edit_select:{task_id}"
+                )
+                for task_id, name in chunk
+            ]
+        )
+    if total_pages > 1:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=BTN_NAV_PREV, callback_data=f"edit_page:{page - 1}"
+                ),
+                InlineKeyboardButton(
+                    text=BTN_NAV_NEXT, callback_data=f"edit_page:{page + 1}"
+                ),
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def edit_card_kb() -> InlineKeyboardMarkup:
+    """Карточка задачи: «Название», «Частота», «Напоминание» и «‹ Назад» (к списку)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=BTN_EDIT_NAME, callback_data="edit_field:name")],
+            [InlineKeyboardButton(text=BTN_EDIT_FREQ, callback_data="edit_field:freq")],
+            [InlineKeyboardButton(text=BTN_EDIT_REMINDER, callback_data="edit_field:rem")],
+            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="edit_back_list")],
+        ]
+    )
+
+
+def edit_return_kb() -> InlineKeyboardMarkup:
+    """Одна кнопка «‹ Вернуться к задаче» (на сообщении об успешном изменении)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=BTN_RETURN_TASK, callback_data="edit_to_card")]
+        ]
+    )
+
+
+def edit_freq_kb() -> InlineKeyboardMarkup:
+    """Выбор частоты при редактировании: «Каждый день», «В конкретные дни», «‹ Назад»."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=BTN_FREQ_DAILY, callback_data="edit_freq_set:daily")],
+            [InlineKeyboardButton(text=BTN_FREQ_SPECIFIC, callback_data="edit_freq_set:specific")],
+            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="edit_to_card")],
+        ]
+    )
+
+
+def edit_days_kb(selected: set[str]) -> InlineKeyboardMarkup:
+    """Выбор дней недели при редактировании (раскладка как в /add) + «Готово» + «‹ Назад»."""
+    buttons: list[InlineKeyboardButton] = []
+    for code, short, _ in WEEKDAYS:
+        mark = "✅ " if code in selected else ""
+        buttons.append(
+            InlineKeyboardButton(text=f"{mark}{short}", callback_data=f"eday:{code}")
+        )
+    rows = [
+        buttons[:4],
+        buttons[4:],
+        [InlineKeyboardButton(text=BTN_DONE, callback_data="edays_done")],
+        [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="edit_freq_back")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def edit_reminder_menu_kb() -> InlineKeyboardMarkup:
+    """Меню существующего напоминания: «Изменить»/«Убрать» и «‹ Назад» отдельной строкой."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=BTN_REM_CHANGE, callback_data="edit_rem_change"),
+                InlineKeyboardButton(text=BTN_REM_REMOVE, callback_data="edit_rem_remove"),
+            ],
+            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="edit_to_card")],
         ]
     )
 
