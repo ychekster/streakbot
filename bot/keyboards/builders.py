@@ -30,8 +30,8 @@ from bot.constants import (
     BTN_FREQ_DAILY,
     BTN_FREQ_ONETIME,
     BTN_FREQ_SPECIFIC,
-    BTN_MARK_EVENING,
     BTN_MARK_OVERDUE,
+    BTN_MARK_TODAY,
     BTN_NAV_NEXT,
     BTN_NAV_PREV,
     BTN_NO,
@@ -40,6 +40,7 @@ from bot.constants import (
     BTN_REMINDER_NO,
     BTN_REMINDER_YES,
     BTN_RETURN_TASK,
+    BTN_UNMARK_TODAY,
     BTN_SETTINGS_EVENING,
     BTN_SETTINGS_MORNING,
     BTN_SETTINGS_TIMEZONE,
@@ -415,33 +416,59 @@ def edit_reminder_menu_kb() -> InlineKeyboardMarkup:
 # --------------------------------------------------------------------------- #
 #  Inline-клавиатуры интерактивной отметки задач (утренний/вечерний дайджест)
 #
-#  Дайджест несёт inline-кнопку отметки (morning_overdue_kb / evening_mark_kb).
-#  По нажатию текущее сообщение редактируется в экран выбора задач — всё
-#  взаимодействие идёт в рамках одного сообщения, новых сообщений не отправляется.
-#  Inline-выбор параметризован префиксом callback-data: "md" — утро (вчерашние
-#  просроченные), "ed" — вечер (сегодняшние невыполненные).
+#  Под дайджестом — inline-кнопки отметки. По нажатию текущее сообщение
+#  редактируется в экран выбора задач — всё в рамках одного сообщения, новых
+#  сообщений не отправляется. Экран выбора параметризован префиксом callback-data:
+#  "tm" — отметка сегодняшних задач (общий флоу утра и вечера, callback входа
+#  `tm_mark:{origin}`), "md" — отметка вчерашних просроченных (только утро).
 # --------------------------------------------------------------------------- #
 
 _CHECK_ON = "☑️"
 _CHECK_OFF = "⬜"
 
 
-def morning_overdue_kb() -> InlineKeyboardMarkup:
-    """Inline-кнопка «Отметить вчерашние задачи» под утренним дайджестом."""
+def _today_mark_button(origin: str, all_done: bool) -> InlineKeyboardButton:
+    """Кнопка отметки сегодняшних задач.
+
+    Текст — «Отменить выполнение», если все задачи уже выполнены, иначе
+    «Отметить выполненные». `origin` ("morning"/"evening") уходит в callback-data,
+    чтобы флоу знал, к какому дайджесту возвращаться.
+    """
+    text = BTN_UNMARK_TODAY if all_done else BTN_MARK_TODAY
+    return InlineKeyboardButton(text=text, callback_data=f"tm_mark:{origin}")
+
+
+def _overdue_button() -> InlineKeyboardButton:
+    """Кнопка «Отметить вчерашние задачи» (вход в флоу просроченных)."""
+    return InlineKeyboardButton(text=BTN_MARK_OVERDUE, callback_data="md_mark")
+
+
+def evening_digest_kb(has_tasks: bool, all_done: bool) -> InlineKeyboardMarkup | None:
+    """Клавиатура вечернего итога: кнопка отметки сегодняшних задач (если они есть)."""
+    if not has_tasks:
+        return None
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=BTN_MARK_OVERDUE, callback_data="md_mark")]
-        ]
+        inline_keyboard=[[_today_mark_button("evening", all_done)]]
     )
 
 
-def evening_mark_kb() -> InlineKeyboardMarkup:
-    """Inline-кнопка «Отметить выполненные» под вечерним итогом."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=BTN_MARK_EVENING, callback_data="ed_mark")]
-        ]
-    )
+def morning_digest_kb(
+    has_today_tasks: bool,
+    all_today_done: bool,
+    has_overdue: bool,
+) -> InlineKeyboardMarkup | None:
+    """Клавиатура утреннего дайджеста.
+
+    Сверху — кнопка отметки сегодняшних задач (если они есть), ниже — кнопка
+    отметки вчерашних просроченных (если они есть). Если нет ни тех, ни других —
+    клавиатуры нет.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if has_today_tasks:
+        rows.append([_today_mark_button("morning", all_today_done)])
+    if has_overdue:
+        rows.append([_overdue_button()])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 def task_select_kb(
