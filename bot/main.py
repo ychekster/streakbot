@@ -104,7 +104,7 @@ async def set_bot_commands(bot: Bot) -> None:
     """Зарегистрировать меню команд бота в Telegram (не критично при сбое)."""
     commands = [
         BotCommand(command="tasks", description="Задачи: все и на сегодня"),
-        BotCommand(command="check", description="Отметить задачи на сегодня"),
+        BotCommand(command="today", description="Отметить задачи на сегодня"),
         BotCommand(command="add", description="Добавить задачу"),
         BotCommand(command="edit", description="Редактировать задачу"),
         BotCommand(command="delete", description="Удалить задачу"),

@@ -22,7 +22,6 @@ from bot.constants import (
     BTN_ADD_TASK,
     BTN_ARROW_NEXT,
     BTN_ARROW_PREV,
-    BTN_CHECK_MARK,
     BTN_CONFIRM,
     BTN_DELETE,
     BTN_DONE,
@@ -43,7 +42,6 @@ from bot.constants import (
     BTN_REMINDER_NO,
     BTN_REMINDER_YES,
     BTN_RETURN_TASK,
-    BTN_SAVE,
     BTN_UNMARK_TODAY,
     BTN_SETTINGS_EVENING,
     BTN_SETTINGS_MORNING,
@@ -62,6 +60,8 @@ from bot.constants import (
     OVERDUE_NO_PAGE_MAX,
     OVERDUE_PAGE_SIZE,
     TIMEZONE_PRESETS,
+    TODAY_NO_PAGE_MAX,
+    TODAY_PAGE_SIZE,
     WEEKDAYS,
 )
 
@@ -583,13 +583,48 @@ def morning_digest_kb(
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
-def check_open_kb() -> InlineKeyboardMarkup:
-    """Кнопка «Отметить» под списком задач /check (вход в режим галочек)."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=BTN_CHECK_MARK, callback_data="check_open")]
+def today_mark_kb(
+    items: list[tuple[int, str]],
+    selected: set[int],
+    page: int,
+) -> InlineKeyboardMarkup:
+    """Клавиатура /today: только галочки задач (+ пагинация при >8 задачах).
+
+    Промежуточных кнопок нет — отметка применяется сразу по нажатию. До 8 задач —
+    ряды по 2 без пагинации (до 4 рядов); больше — 6 на странице (3 ряда) плюс ряд
+    пагинации «‹ Назад» / «Далее ›» (alert на краях обрабатывает хендлер). Текущая
+    страница кодируется прямо в callback-data галочек (`today_toggle:{page}:{id}`),
+    поэтому флоу полностью без FSM и переживает рестарт бота.
+    """
+    nav_row: list[InlineKeyboardButton] = []
+    if len(items) <= TODAY_NO_PAGE_MAX:
+        page = 0
+        page_items = items
+    else:
+        total_pages = (len(items) + TODAY_PAGE_SIZE - 1) // TODAY_PAGE_SIZE
+        page = max(0, min(page, total_pages - 1))
+        start = page * TODAY_PAGE_SIZE
+        page_items = items[start : start + TODAY_PAGE_SIZE]
+        nav_row = [
+            InlineKeyboardButton(
+                text=BTN_NAV_PREV, callback_data=f"today_page:{page - 1}"
+            ),
+            InlineKeyboardButton(
+                text=BTN_NAV_NEXT, callback_data=f"today_page:{page + 1}"
+            ),
         ]
-    )
+
+    buttons = [
+        InlineKeyboardButton(
+            text=f"{_CHECK_ON if task_id in selected else _CHECK_OFF} {_truncate(name)}",
+            callback_data=f"today_toggle:{page}:{task_id}",
+        )
+        for task_id, name in page_items
+    ]
+    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+    if nav_row:
+        rows.append(nav_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def task_select_kb(
@@ -597,17 +632,13 @@ def task_select_kb(
     selected: set[int],
     page: int,
     prefix: str,
-    *,
-    done_text: str = BTN_DONE,
-    with_back: bool = True,
 ) -> InlineKeyboardMarkup:
-    """Выбор задач с галочками + кнопка завершения (+ опционально «‹ Назад»).
+    """Выбор задач с галочками + «Готово» + «‹ Назад» (к дайджесту).
 
     До 6 задач — ряды по 2 (без пагинации). Больше — 4 на странице (2 ряда)
-    и ряд пагинации «‹ Назад» / «Далее ›» (alert на краях). Затем ряд завершения
-    (`done_text`, по умолчанию «Готово») и, если `with_back`, отдельной строкой
-    «‹ Назад» (к дайджесту). Параметры `done_text`/`with_back` позволяют тем же
-    билдером собрать клавиатуру /check (кнопка «Сохранить», без «‹ Назад»).
+    и ряд пагинации «‹ Назад» / «Далее ›» (alert на краях). Затем ряд «Готово» и
+    отдельной строкой «‹ Назад» (к дайджесту). Используется флоу отметки
+    сегодняшних (`tm`) и вчерашних просроченных (`md`) задач под дайджестами.
     """
     nav_row: list[InlineKeyboardButton] = []
     if len(items) <= OVERDUE_NO_PAGE_MAX:
@@ -636,11 +667,10 @@ def task_select_kb(
     rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
     if nav_row:
         rows.append(nav_row)
-    rows.append([InlineKeyboardButton(text=done_text, callback_data=f"{prefix}_done")])
-    if with_back:
-        rows.append(
-            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data=f"{prefix}_back_digest")]
-        )
+    rows.append([InlineKeyboardButton(text=BTN_DONE, callback_data=f"{prefix}_done")])
+    rows.append(
+        [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data=f"{prefix}_back_digest")]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

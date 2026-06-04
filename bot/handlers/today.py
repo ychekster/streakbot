@@ -1,8 +1,9 @@
 """Интерактивные дайджесты и напоминания.
 
 Здесь живёт вся логика утреннего и вечернего дайджестов (сборка текста и
-интерактивная отметка задач), а также обработчик кнопки «Выполнена» на
-напоминании. Команд `/today` и `/done` больше нет.
+интерактивная отметка задач), обработчик кнопки «Выполнена» на напоминании, а
+также команда `/today` — список задач на сегодня сразу с галочками (отметка
+применяется по нажатию). Отдельной команды `/done` нет.
 
 Оба дайджеста несут inline-кнопку отметки сегодняшних задач (`tm_*` — общий
 для утреннего и вечернего дайджеста): по нажатию текущее сообщение редактируется
@@ -38,17 +39,17 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from loguru import logger
 
-from bot.constants import BTN_SAVE, OVERDUE_PAGE_SIZE, TEXTS
+from bot.constants import OVERDUE_PAGE_SIZE, TEXTS, TODAY_PAGE_SIZE
 from bot.database.models import Task, TaskLog, TaskStatus, User
 from bot.database.repository import Repository
 from bot.keyboards.builders import (
     REMOVE_KB,
-    check_open_kb,
     evening_digest_kb,
     morning_digest_kb,
     overdue_expired_kb,
     select_confirm_kb,
     task_select_kb,
+    today_mark_kb,
 )
 from bot.utils.validators import escape_md
 
@@ -71,19 +72,6 @@ class MarkingStates(StatesGroup):
     """
 
     active = State()
-
-
-class CheckStates(StatesGroup):
-    """Активен режим отметки задач из /check (галочки + «Сохранить»).
-
-    Как и `MarkingStates`, вход (`check_open`) — без фильтра состояния (кнопка
-    «Отметить» живёт на сообщении /check и должна работать и после рестарта), а
-    шаги (`check_toggle`/`check_page`/`check_done`) требуют это состояние.
-    Состояние отдельное от `MarkingStates`, чтобы флоу /check и флоу дайджестов
-    не перехватывали кнопки друг друга. Выбор хранится в FSM (`check_selected`).
-    """
-
-    marking = State()
 
 
 def _user_tz(user: User) -> pytz.BaseTzInfo:
@@ -780,174 +768,125 @@ async def tm_confirm(callback: CallbackQuery, state: FSMContext, repo: Repositor
 
 
 # --------------------------------------------------------------------------- #
-#  Команда /check: список задач на сегодня с отметкой галочками
+#  Команда /today: список задач на сегодня сразу с отметкой галочками
 #
 #  Сообщение: жирный заголовок «Задачи на сегодня», блок невыполненных (обычный
-#  текст), блок выполненных (зачёркнутый), жирный абзац-подсказка + кнопка
-#  «Отметить». «Отметить» меняет только клавиатуру на галочки (+ «Сохранить»
-#  вместо «Готово»); смена галочки в реальном времени перемещает задачу между
-#  блоками в тексте. «Сохранить» фиксирует статусы в БД и возвращает список
-#  (кнопка «Отметить» остаётся). Робастность — как у tm/md: вход без фильтра
-#  состояния, шаги под `CheckStates.marking`; выбор — в FSM (`check_selected`,
-#  `check_page`).
+#  текст), блок выполненных (зачёркнутый), жирный абзац-подсказка и клавиатура с
+#  галочками. Промежуточных шагов нет: нажатие на галочку сразу переключает статус
+#  задачи в БД (done ↔ pending) и на месте перестраивает текст и клавиатуру.
+#  Флоу без FSM — источник истины статусов это БД, а текущая страница приходит в
+#  callback-data, поэтому кнопки работают и после рестарта бота.
 # --------------------------------------------------------------------------- #
 
-def _check_view_text(ordered: list[Task], selected: set[int], prompt: str) -> str:
-    """Текст /check по разбиению `selected`.
+def _today_view_text(ordered: list[Task], done_ids: set[int]) -> str:
+    """Текст /today по статусам сегодняшних задач.
 
-    Верхний блок — задачи не из `selected` (обычный текст), нижний — из `selected`
+    Верхний блок — невыполненные задачи (обычный текст), нижний — выполненные
     (зачёркнутый); между непустыми блоками — пустая строка, пустые блоки
     опускаются. Заголовок и подсказка — жирные.
     """
-    not_done = [escape_md(t.name) for t in ordered if t.id not in selected]
-    done = [f"~{escape_md(t.name)}~" for t in ordered if t.id in selected]
+    not_done = [escape_md(t.name) for t in ordered if t.id not in done_ids]
+    done = [f"~{escape_md(t.name)}~" for t in ordered if t.id in done_ids]
     blocks: list[str] = []
     if not_done:
         blocks.append("\n".join(not_done))
     if done:
         blocks.append("\n".join(done))
     body = "\n\n".join(blocks)
-    header = f"*{escape_md(TEXTS['check_header'])}*"
-    footer = f"*{escape_md(prompt)}*"
+    header = f"*{escape_md(TEXTS['today_header'])}*"
+    footer = f"*{escape_md(TEXTS['today_prompt'])}*"
     return f"{header}\n\n{body}\n\n{footer}"
 
 
-def _check_mark_kb(
-    ordered: list[Task], selected: set[int], page: int
-) -> InlineKeyboardMarkup:
-    """Клавиатура отметки /check: галочки (формат дайджеста) + «Сохранить», без «‹ Назад»."""
-    return task_select_kb(
-        [(t.id, t.name) for t in ordered],
-        selected,
-        page,
-        "check",
-        done_text=BTN_SAVE,
-        with_back=False,
-    )
-
-
-async def _check_list_view(
+async def _today_ordered(
     repo: Repository,
     user: User,
-    prompt: str,
-) -> tuple[str, InlineKeyboardMarkup | None]:
-    """Вид покоя /check: два блока по статусам из БД + подсказка + кнопка «Отметить».
+    today,
+) -> tuple[list[Task], set[int]]:
+    """Сегодняшние задачи (упорядоченные) и id выполненных, гарантируя логи.
 
-    Если на сегодня задач нет — текст-заглушка и клавиатура None. Сегодняшние логи
-    при необходимости создаются (как при сборке дайджеста).
+    Сначала создаёт недостающие pending-логи (как сборка дайджеста), затем читает
+    актуальные статусы. Порядок: сначала невыполненные, затем выполненные.
     """
-    today = datetime.now(_user_tz(user)).date()
     await _today_tasks(repo, user, today)  # создаём pending-логи сегодняшних задач
-    ordered, done_ids = await _today_marking_tasks(repo, user, today)
-    if not ordered:
-        return escape_md(TEXTS["tasks_today_empty"]), None
-    return _check_view_text(ordered, done_ids, prompt), check_open_kb()
+    return await _today_marking_tasks(repo, user, today)
 
 
-@router.message(Command("check"))
-async def cmd_check(message: Message, state: FSMContext, repo: Repository) -> None:
-    """/check — прислать список задач на сегодня с кнопкой «Отметить»."""
+@router.message(Command("today"))
+async def cmd_today(message: Message, state: FSMContext, repo: Repository) -> None:
+    """/today — список задач на сегодня сразу с галочками (отметка по нажатию)."""
     await state.clear()
     user = await repo.get_user(message.from_user.id)
-    text, keyboard = await _check_list_view(repo, user, TEXTS["check_prompt"])
-    await message.answer(text, reply_markup=keyboard or REMOVE_KB)
-
-
-@router.callback_query(F.data == "check_open")
-async def check_open(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """«Отметить» — заменить клавиатуру на галочки (текст сообщения не трогаем)."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    user = await repo.get_user(callback.from_user.id)
     today = datetime.now(_user_tz(user)).date()
-    await _today_tasks(repo, user, today)
-    ordered, done_ids = await _today_marking_tasks(repo, user, today)
+    ordered, done_ids = await _today_ordered(repo, user, today)
     if not ordered:
-        # Задач на сегодня не осталось — показываем заглушку без кнопки.
-        await callback.answer(TEXTS["tasks_today_empty"], show_alert=True)
-        await callback.message.edit_text(
-            escape_md(TEXTS["tasks_today_empty"]), reply_markup=None
-        )
+        await message.answer(escape_md(TEXTS["tasks_today_empty"]), reply_markup=REMOVE_KB)
         return
-    # Стартовые галочки = уже выполненные задачи.
-    await state.set_state(CheckStates.marking)
-    await state.update_data(check_selected=list(done_ids), check_page=0)
-    await callback.message.edit_reply_markup(reply_markup=_check_mark_kb(ordered, done_ids, 0))
-    await callback.answer()
+    await message.answer(
+        _today_view_text(ordered, done_ids),
+        reply_markup=today_mark_kb([(t.id, t.name) for t in ordered], done_ids, 0),
+    )
 
 
-@router.callback_query(CheckStates.marking, F.data.startswith("check_toggle:"))
-async def check_toggle(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """Смена галочки: задача в реальном времени перемещается между блоками в тексте."""
+@router.callback_query(F.data.startswith("today_toggle:"))
+async def today_toggle(callback: CallbackQuery, repo: Repository) -> None:
+    """Нажатие на галочку: сразу переключить статус задачи в БД и перестроить вид.
+
+    Без FSM: статус берётся из БД и тут же меняется (done ↔ pending), страница
+    приходит в callback-data. Поэтому кнопки работают и после рестарта бота.
+    """
     if callback.message is None:
         await callback.answer()
         return
-    task_id = int(callback.data.split(":", 1)[1])
+    # callback-data: "today_toggle:{page}:{task_id}".
+    _, page_raw, task_id_raw = callback.data.split(":")
+    page, task_id = int(page_raw), int(task_id_raw)
     user = await repo.get_user(callback.from_user.id)
     today = datetime.now(_user_tz(user)).date()
-    ordered, _ = await _today_marking_tasks(repo, user, today)
-    valid_ids = {task.id for task in ordered}
-    if task_id not in valid_ids:
-        # Задача исчезла (удалена) — ничего не меняем.
+    ordered, _ = await _today_ordered(repo, user, today)
+    if task_id not in {task.id for task in ordered}:
+        # Задача исчезла (удалена) или больше не на сегодня — ничего не меняем.
         await callback.answer()
         return
-    data = await state.get_data()
-    selected = set(data.get("check_selected", [])) & valid_ids
-    page = data.get("check_page", 0)
-    selected.symmetric_difference_update({task_id})
-    await state.update_data(check_selected=list(selected))
-    # Обновляем и текст (блоки по выбору), и клавиатуру (галочки).
+    # Переключаем статус сегодняшнего лога: выполнено ↔ не выполнено.
+    log = await repo.get_or_create_log(task_id, user.telegram_id, today)
+    new_status = (
+        TaskStatus.pending if log.status == TaskStatus.done else TaskStatus.done
+    )
+    await repo.set_log_status(log, new_status)
+    logger.info(
+        "User {} toggled task {} via /today (now {})",
+        user.telegram_id, task_id, new_status.name,
+    )
+    # Пересчитываем порядок и галочки после изменения и перерисовываем сообщение.
+    ordered, done_ids = await _today_marking_tasks(repo, user, today)
     await callback.message.edit_text(
-        _check_view_text(ordered, selected, TEXTS["check_prompt"]),
-        reply_markup=_check_mark_kb(ordered, selected, page),
+        _today_view_text(ordered, done_ids),
+        reply_markup=today_mark_kb([(t.id, t.name) for t in ordered], done_ids, page),
     )
     await callback.answer()
 
 
-@router.callback_query(CheckStates.marking, F.data.startswith("check_page:"))
-async def check_page(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """Пагинация клавиатуры отметки (текст показывает все задачи; alert на краях)."""
+@router.callback_query(F.data.startswith("today_page:"))
+async def today_page(callback: CallbackQuery, repo: Repository) -> None:
+    """Пагинация клавиатуры /today (текст показывает все задачи; alert на краях)."""
     if callback.message is None:
         await callback.answer()
         return
     page = int(callback.data.split(":", 1)[1])
     user = await repo.get_user(callback.from_user.id)
     today = datetime.now(_user_tz(user)).date()
-    ordered, _ = await _today_marking_tasks(repo, user, today)
-    total_pages = max(1, (len(ordered) + OVERDUE_PAGE_SIZE - 1) // OVERDUE_PAGE_SIZE)
+    ordered, done_ids = await _today_marking_tasks(repo, user, today)
+    total_pages = max(1, (len(ordered) + TODAY_PAGE_SIZE - 1) // TODAY_PAGE_SIZE)
     if page < 0:
         await callback.answer(TEXTS["pagination_first"], show_alert=True)
         return
     if page >= total_pages:
         await callback.answer(TEXTS["pagination_last"], show_alert=True)
         return
-    data = await state.get_data()
-    selected = set(data.get("check_selected", []))
-    await state.update_data(check_page=page)
-    await callback.message.edit_reply_markup(reply_markup=_check_mark_kb(ordered, selected, page))
-    await callback.answer()
-
-
-@router.callback_query(CheckStates.marking, F.data == "check_done")
-async def check_save(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """«Сохранить» — зафиксировать статусы и вернуть список с кнопкой «Отметить»."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    user = await repo.get_user(callback.from_user.id)
-    today = datetime.now(_user_tz(user)).date()
-    ordered, _ = await _today_marking_tasks(repo, user, today)
-    data = await state.get_data()
-    selected = set(data.get("check_selected", [])) & {task.id for task in ordered}
-    done_count = await _apply_today_marks(repo, user, ordered, selected, today)
-    await state.clear()
-    logger.info(
-        "User {} saved /check marking ({}/{} done)",
-        user.telegram_id, done_count, len(ordered),
+    await callback.message.edit_reply_markup(
+        reply_markup=today_mark_kb([(t.id, t.name) for t in ordered], done_ids, page)
     )
-    text, keyboard = await _check_list_view(repo, user, TEXTS["check_prompt_saved"])
-    await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
 
 
