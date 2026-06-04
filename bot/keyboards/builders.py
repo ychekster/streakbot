@@ -50,6 +50,7 @@ from bot.constants import (
     BTN_SETTINGS_TIMEZONE,
     BTN_SKIP,
     BTN_START,
+    BTN_TASK_DONE,
     BTN_TASKS_ALL,
     BTN_TASKS_TODAY,
     BTN_TODAY_BACK,
@@ -317,41 +318,106 @@ def stats_nav_kb(page: int, total_pages: int) -> InlineKeyboardMarkup | None:
 # --------------------------------------------------------------------------- #
 #  Inline-клавиатуры просмотра задач (/tasks)
 #
-#  Меню с двумя пунктами; всё взаимодействие — в рамках одного сообщения.
-#  «Задачи на сегодня» переиспользует общий флоу отметки (`tm_mark:tasks`),
-#  «Все задачи» — отображение, идентичное /stats, со стрелочной пагинацией.
+#  Всё взаимодействие — в рамках одного сообщения (редактирование). Контекст
+#  (раздел "a"/"t" и страница) кодируется прямо в callback-data, поэтому навигация
+#  переживает сброс FSM. Иерархия: меню → список раздела → карточка задачи →
+#  подтверждение удаления.
 # --------------------------------------------------------------------------- #
 
 def tasks_menu_kb() -> InlineKeyboardMarkup:
-    """Меню /tasks: «Все задачи» и «Задачи на сегодня» (каждая — отдельной строкой)."""
+    """Меню /tasks: «Все задачи» (раздел "a") и «Задачи на сегодня» (раздел "t")."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=BTN_TASKS_ALL, callback_data="tasks_all")],
-            [InlineKeyboardButton(text=BTN_TASKS_TODAY, callback_data="tm_mark:tasks")],
+            [InlineKeyboardButton(text=BTN_TASKS_ALL, callback_data="tk_list:a:0")],
+            [InlineKeyboardButton(text=BTN_TASKS_TODAY, callback_data="tk_list:t:0")],
         ]
     )
 
 
-def tasks_all_kb(page: int, total_pages: int) -> InlineKeyboardMarkup:
-    """Раздел «Все задачи»: стрелочная пагинация «‹»/«›» + «‹ Назад» (к меню /tasks).
+def tasks_list_kb(
+    items: list[tuple[int, str]],
+    section: str,
+    page: int,
+    total_pages: int,
+) -> InlineKeyboardMarkup:
+    """Список задач раздела: кнопки задач (по 2 в ряд) + стрелки + «‹ Назад» (к меню).
 
-    Стрелки показываются только при нескольких страницах (alert на краях — в
-    хендлере); «‹ Назад» — всегда отдельной строкой внизу.
+    `items` — пары (id, name) текущей страницы (до 5). Кнопки идут по 2 в ряд
+    (последняя нечётная — одна), ниже — стрелки «‹»/«›» (если страниц больше
+    одной; alert на краях обрабатывает хендлер), внизу — «‹ Назад» к меню /tasks.
     """
     rows: list[list[InlineKeyboardButton]] = []
+    buttons = [
+        InlineKeyboardButton(
+            text=_truncate(name), callback_data=f"tk_card:{section}:{page}:{task_id}"
+        )
+        for task_id, name in items
+    ]
+    rows.extend(buttons[i : i + 2] for i in range(0, len(buttons), 2))
     if total_pages > 1:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=BTN_ARROW_PREV, callback_data=f"tasks_all_page:{page - 1}"
+                    text=BTN_ARROW_PREV, callback_data=f"tk_list:{section}:{page - 1}"
                 ),
                 InlineKeyboardButton(
-                    text=BTN_ARROW_NEXT, callback_data=f"tasks_all_page:{page + 1}"
+                    text=BTN_ARROW_NEXT, callback_data=f"tk_list:{section}:{page + 1}"
                 ),
             ]
         )
     rows.append([InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="tasks_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def task_card_kb(
+    section: str,
+    page: int,
+    task_id: int,
+    is_today: bool,
+    is_done: bool,
+) -> InlineKeyboardMarkup:
+    """Клавиатура карточки задачи.
+
+    «Выполнено» с галочкой (☑️/⬜) — только если задача запланирована на сегодня
+    (`is_today`); нажатие переключает статус. Ниже — удаление; в последнем ряду
+    «‹ Назад» к списку (на ту же страницу раздела).
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if is_today:
+        mark = _CHECK_ON if is_done else _CHECK_OFF
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{mark} {BTN_TASK_DONE}",
+                    callback_data=f"tk_done:{section}:{page}:{task_id}",
+                )
+            ]
+        )
+    rows.append(
+        [InlineKeyboardButton(text=BTN_DELETE, callback_data=f"tk_del:{section}:{page}:{task_id}")]
+    )
+    rows.append(
+        [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data=f"tk_list:{section}:{page}")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def task_delete_confirm_kb(section: str, page: int, task_id: int) -> InlineKeyboardMarkup:
+    """Подтверждение удаления из карточки: «Подтвердить» (`tk_dok`) и «‹ Назад» (к карточке)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=BTN_CONFIRM, callback_data=f"tk_dok:{section}:{page}:{task_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=BTN_TODAY_BACK, callback_data=f"tk_card:{section}:{page}:{task_id}"
+                )
+            ],
+        ]
+    )
 
 
 # --------------------------------------------------------------------------- #
