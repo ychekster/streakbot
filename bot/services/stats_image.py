@@ -58,10 +58,14 @@ _COLOR_CELL_EMPTY = (235, 241, 250)  # #EBF1FA — пропущенный/нев
 # Название задачи (верхний блок).
 _NAME_X = 120
 _NAME_Y = 300
-# Название не должно «залезать» на сетку справа (она начинается с _GRID_X):
-# оставляем небольшой отступ и обрезаем длинное название многоточием.
-_NAME_GRID_GAP = 24
-_NAME_MAX_WIDTH = 644 - _NAME_X - _NAME_GRID_GAP  # 500 px
+# Ширина текстового блока названия ограничена 450 px: текст переносится по словам
+# (до двух строк, без уменьшения шрифта); если слово не влезает в строку — уходит
+# на следующую, а если не помещается и в две строки — вторая строка обрезается
+# многоточием. Координаты x/y, размер и жирность шрифта при этом не меняются.
+_NAME_MAX_WIDTH = 450
+_NAME_MAX_LINES = 2
+# Межстрочный интервал ≈ line-height 1: шаг между строками равен размеру шрифта.
+_NAME_LINE_HEIGHT = _NAME_FONT_SIZE
 
 # Числа стрика (верхний блок): текущий стрик и рекорд на одной высоте.
 _CURRENT_X = 120
@@ -81,6 +85,14 @@ _CELL_GAP_X = 17
 _CELL_GAP_Y = 17
 _CELL_RADIUS = 12
 
+# Однотонный прямоугольник, закрывающий пустой нижний блок при нечётном числе
+# задач (рисуется поверх шаблона на последней картинке, если на ней одна задача).
+_COVER_X = 97
+_COVER_Y = 770
+_COVER_W = 1060
+_COVER_H = 400
+_COLOR_COVER = (254, 253, 253)  # #FEFDFD
+
 
 @dataclass(frozen=True)
 class TaskStatsCard:
@@ -98,8 +110,13 @@ class TaskStatsCard:
 
 @lru_cache(maxsize=1)
 def _load_template() -> Image.Image:
-    """Загрузить шаблон один раз (кешируется). Перед рисованием берётся `.copy()`."""
-    return Image.open(_TEMPLATE_PATH).convert("RGBA")
+    """Загрузить шаблон один раз (кешируется), в RGB. Перед рисованием берётся `.copy()`.
+
+    Альфа-канал шаблона полностью непрозрачен, поэтому переход в RGB не меняет вид,
+    но заметно уменьшает размер итогового PNG — это ускоряет выгрузку альбома и
+    снижает риск таймаута при отправке.
+    """
+    return Image.open(_TEMPLATE_PATH).convert("RGB")
 
 
 @lru_cache(maxsize=None)
@@ -121,6 +138,44 @@ def _truncate_to_width(text: str, font: ImageFont.FreeTypeFont, max_width: int) 
     while truncated and font.getlength(truncated + ellipsis) > max_width:
         truncated = truncated[:-1].rstrip()
     return f"{truncated}{ellipsis}" if truncated else ellipsis
+
+
+def _wrap_words(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
+    """Жадно перенести текст по словам так, чтобы каждая строка влезала в max_width.
+
+    Слово, которое само шире строки, не разрывается (займёт строку целиком и при
+    необходимости будет обрезано позже). Число строк не ограничено.
+    """
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        candidate = word if not current else f"{current} {word}"
+        if not current or font.getlength(candidate) <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def _fit_name_lines(
+    text: str, font: ImageFont.FreeTypeFont, max_width: int, max_lines: int
+) -> list[str]:
+    """Разбить название максимум на max_lines строк, не уменьшая шрифт.
+
+    Сначала жадный перенос по словам. Если строк получилось больше лимита, весь
+    «хвост» сворачивается в последнюю разрешённую строку, и она обрезается
+    многоточием. Каждая строка дополнительно подрезается по ширине на случай
+    слишком длинного одиночного слова.
+    """
+    lines = _wrap_words(text, font, max_width)
+    if len(lines) > max_lines:
+        head = lines[: max_lines - 1]
+        tail = " ".join(lines[max_lines - 1 :])
+        lines = head + [tail]
+    return [_truncate_to_width(line, font, max_width) for line in lines]
 
 
 def _draw_grid(draw: ImageDraw.ImageDraw, values: Sequence[bool], y_offset: int) -> None:
@@ -147,9 +202,13 @@ def _draw_card(draw: ImageDraw.ImageDraw, card: TaskStatsCard, y_offset: int) ->
     name_font = _load_font(_NAME_FONT_SIZE)
     number_font = _load_font(_NUMBER_FONT_SIZE)
 
-    # Название задачи (обрезаем, чтобы не залезть на сетку справа).
-    name = _truncate_to_width(card.name, name_font, _NAME_MAX_WIDTH)
-    draw.text((_NAME_X, _NAME_Y + y_offset), name, font=name_font, fill=_COLOR_BLACK)
+    # Название задачи: до двух строк (перенос по словам, без уменьшения шрифта),
+    # вторая строка при нехватке обрезается многоточием. X/Y первой строки
+    # неизменны, вторая строка ниже на _NAME_LINE_HEIGHT (≈ line-height 1).
+    name_lines = _fit_name_lines(card.name, name_font, _NAME_MAX_WIDTH, _NAME_MAX_LINES)
+    for line_index, line in enumerate(name_lines):
+        line_y = _NAME_Y + y_offset + line_index * _NAME_LINE_HEIGHT
+        draw.text((_NAME_X, line_y), line, font=name_font, fill=_COLOR_BLACK)
 
     # Числа стрика: текущий и рекорд.
     draw.text(
@@ -170,13 +229,24 @@ def _draw_card(draw: ImageDraw.ImageDraw, card: TaskStatsCard, y_offset: int) ->
 
 
 def _render_image(cards: Sequence[TaskStatsCard]) -> bytes:
-    """Нарисовать одну картинку (до двух задач) поверх копии шаблона; вернуть PNG-байты."""
+    """Нарисовать одну картинку (до двух задач) поверх копии шаблона; вернуть PNG-байты.
+
+    Если на картинке только одна задача (нечётное число задач), пустой нижний блок
+    закрывается однотонным прямоугольником поверх шаблона. PNG сохраняется с
+    оптимизацией, чтобы уменьшить размер и ускорить выгрузку альбома.
+    """
     image = _load_template().copy()
     draw = ImageDraw.Draw(image)
     for position, card in enumerate(cards[:_CARDS_PER_IMAGE]):
         _draw_card(draw, card, y_offset=_BLOCK_OFFSET * position)
+    if len(cards) < _CARDS_PER_IMAGE:
+        # Нечётная последняя задача — закрываем пустой нижний блок заглушкой.
+        draw.rectangle(
+            (_COVER_X, _COVER_Y, _COVER_X + _COVER_W, _COVER_Y + _COVER_H),
+            fill=_COLOR_COVER,
+        )
     buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
+    image.save(buffer, format="PNG", optimize=True)
     return buffer.getvalue()
 
 

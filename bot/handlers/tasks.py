@@ -52,14 +52,18 @@ _SEC_TODAY = "t"    # задачи на сегодня
 #  Вспомогательные функции
 # --------------------------------------------------------------------------- #
 
-async def _user_today(repo: Repository, user_id: int) -> date:
-    """Текущая дата в часовом поясе пользователя (UTC как фолбэк)."""
+async def _user_tz(repo: Repository, user_id: int) -> pytz.BaseTzInfo:
+    """Часовой пояс пользователя (UTC как фолбэк)."""
     user = await repo.get_user(user_id)
     try:
-        tz = pytz.timezone(user.timezone) if user and user.timezone else pytz.utc
+        return pytz.timezone(user.timezone) if user and user.timezone else pytz.utc
     except Exception:  # noqa: BLE001
-        tz = pytz.utc
-    return datetime.now(tz).date()
+        return pytz.utc
+
+
+async def _user_today(repo: Repository, user_id: int) -> date:
+    """Текущая дата в часовом поясе пользователя (UTC как фолбэк)."""
+    return datetime.now(await _user_tz(repo, user_id)).date()
 
 
 def _freq_str(task: Task) -> str:
@@ -87,11 +91,16 @@ async def _section_data(
     return tasks, TEXTS["tasks_all_header"]
 
 
-async def _task_streak_lines(repo: Repository, task: Task) -> list[str]:
-    """Строки со стриком задачи (для одноразовых — пусто: они не участвуют в стриках)."""
+async def _task_streak_lines(
+    repo: Repository, task: Task, tz: pytz.BaseTzInfo
+) -> list[str]:
+    """Строки со стриком задачи (для одноразовых — пусто: они не участвуют в стриках).
+
+    Текущий стрик считается с учётом окна восстановления (по поясу `tz`), как в /stats.
+    """
     if task.frequency_type == FrequencyType.one_time:
         return []
-    current = await get_current_streak(repo, task.id)
+    current = await get_current_streak(repo, task.id, tz)
     best = await get_max_streak(repo, task.id)
     return [
         f"🔥 {escape_md(f'Текущий стрик: {current} дней')}",
@@ -99,18 +108,20 @@ async def _task_streak_lines(repo: Repository, task: Task) -> list[str]:
     ]
 
 
-async def _list_text(repo: Repository, tasks: list[Task], header: str) -> str:
+async def _list_text(
+    repo: Repository, tasks: list[Task], header: str, tz: pytz.BaseTzInfo
+) -> str:
     """Текст списка: жирный заголовок + по задаче (название + стрик) + жирная подсказка."""
     lines = [f"*{escape_md(header)}*", ""]
     for task in tasks:
         lines.append(escape_md(task.name))
-        lines.extend(await _task_streak_lines(repo, task))
+        lines.extend(await _task_streak_lines(repo, task, tz))
         lines.append("")
     lines.append(f"*{escape_md(TEXTS['tasks_list_prompt'])}*")
     return "\n".join(lines)
 
 
-async def _card_text(repo: Repository, task: Task) -> str:
+async def _card_text(repo: Repository, task: Task, tz: pytz.BaseTzInfo) -> str:
     """Текст карточки: название (жирное), параметры (частота, напоминание), стрик, подсказка."""
     lines = [
         f"*{escape_md(task.name)}*",
@@ -121,7 +132,7 @@ async def _card_text(repo: Repository, task: Task) -> str:
         lines.append(f"⏰ {escape_md(task.reminder_time.strftime('%H:%M'))}")
     else:
         lines.append(f"⏰ {escape_md(TEXTS['edit_reminder_none'])}")
-    streak = await _task_streak_lines(repo, task)
+    streak = await _task_streak_lines(repo, task, tz)
     if streak:
         lines.append("")
         lines.extend(streak)
@@ -144,7 +155,8 @@ async def _list_view(
     total_pages = max(1, (len(tasks) + STATS_PAGE_SIZE - 1) // STATS_PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
     page_tasks = tasks[page * STATS_PAGE_SIZE : (page + 1) * STATS_PAGE_SIZE]
-    text = await _list_text(repo, page_tasks, header)
+    tz = await _user_tz(repo, user_id)
+    text = await _list_text(repo, page_tasks, header, tz)
     keyboard = tasks_list_kb(
         [(t.id, t.name) for t in page_tasks], section, page, total_pages
     )
@@ -224,13 +236,14 @@ async def _show_card(
     callback: CallbackQuery, repo: Repository, section: str, page: int, task: Task
 ) -> None:
     """Отрисовать карточку задачи (с учётом «есть ли сегодня» и текущей отметки)."""
-    today = await _user_today(repo, callback.from_user.id)
+    tz = await _user_tz(repo, callback.from_user.id)
+    today = datetime.now(tz).date()
     is_today = await _is_due_today(repo, callback.from_user.id, task.id, today)
     is_done = False
     if is_today:
         log = await repo.get_log(task.id, today)
         is_done = log is not None and log.status == TaskStatus.done
-    text = await _card_text(repo, task)
+    text = await _card_text(repo, task, tz)
     await callback.message.edit_text(
         text, reply_markup=task_card_kb(section, page, task.id, is_today, is_done)
     )
