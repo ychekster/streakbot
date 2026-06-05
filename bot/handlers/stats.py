@@ -1,25 +1,38 @@
-"""/stats — статистика и стрики по всем активным задачам (с пагинацией).
+"""/stats — статистика и стрики по всем активным задачам в виде альбома картинок.
+
+Команда собирает по каждой активной задаче (без одноразовых — они не участвуют в
+стриках) название, текущий и рекордный стрик и сетку последних 30 дней, рендерит
+PNG-картинки поверх готового шаблона (`services/stats_image.py`) — по две задачи
+на картинку — и отправляет их альбомом.
 
 `stats_tasks` вынесена как переиспользуемая: тот же набор задач (активные, без
-одноразовых) показывает раздел «Все задачи» команды /tasks. `render_stats_page`
-осталась внутренней сборкой текста страницы статистики.
+одноразовых) показывает раздел «Все задачи» команды /tasks.
 """
 
 from __future__ import annotations
 
-from aiogram import F, Router
+from datetime import date, datetime
+
+import pytz
+from aiogram import Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import BufferedInputFile, InputMediaPhoto, Message
+from loguru import logger
 
-from bot.constants import STATS_PAGE_SIZE, TEXTS
-from bot.database.models import FrequencyType, Task
+from bot.constants import TEXTS
+from bot.database.models import FrequencyType, Task, User
 from bot.database.repository import Repository
-from bot.keyboards.builders import REMOVE_KB, stats_nav_kb
-from bot.services.streak import get_current_streak, get_max_streak
+from bot.keyboards.builders import REMOVE_KB
+from bot.services.stats_image import TaskStatsCard, render_stats_album
+from bot.services.streak import get_current_streak, get_last_30_days, get_max_streak
 from bot.utils.validators import escape_md
 
 router = Router(name="stats")
+
+# Telegram ограничивает медиагруппу 2–10 элементами: при большем числе картинок
+# они отправляются несколькими альбомами, а одиночная картинка — отдельным фото.
+_ALBUM_MAX = 10
 
 
 async def stats_tasks(repo: Repository, user_id: int) -> list[Task]:
@@ -31,73 +44,67 @@ async def stats_tasks(repo: Repository, user_id: int) -> list[Task]:
     ]
 
 
-async def render_stats_page(
-    repo: Repository,
-    tasks: list[Task],
-    page: int,
-) -> tuple[str, int, int]:
-    """Собрать текст страницы статистики.
+def _user_today(user: User | None) -> date:
+    """Сегодняшняя дата в часовом поясе пользователя (UTC как фолбэк)."""
+    try:
+        tz = pytz.timezone(user.timezone) if user and user.timezone else pytz.utc
+    except Exception:  # noqa: BLE001 — некорректная таймзона не должна ронять команду
+        tz = pytz.utc
+    return datetime.now(tz).date()
 
-    Возвращает (текст, нормализованный номер страницы, всего страниц). Номер
-    страницы нормализуется в диапазон [0, total_pages - 1].
+
+async def _build_cards(
+    repo: Repository, tasks: list[Task], today: date
+) -> list[TaskStatsCard]:
+    """Собрать динамические данные (название, стрики, сетка 30 дней) по каждой задаче."""
+    cards: list[TaskStatsCard] = []
+    for task in tasks:
+        cards.append(
+            TaskStatsCard(
+                name=task.name,
+                current_streak=await get_current_streak(repo, task.id),
+                max_streak=await get_max_streak(repo, task.id),
+                last_30_days=await get_last_30_days(repo, task.id, today),
+            )
+        )
+    return cards
+
+
+async def _send_album(message: Message, images: list[bytes]) -> None:
+    """Отправить картинки статистики: одиночную — фото, несколько — альбомами по 10.
+
+    Медиагруппа Telegram принимает 2–10 элементов, поэтому картинки бьются на
+    альбомы по `_ALBUM_MAX`; «хвост» из одной картинки уходит отдельным фото.
     """
-    total_pages = max(1, (len(tasks) + STATS_PAGE_SIZE - 1) // STATS_PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    page_tasks = tasks[page * STATS_PAGE_SIZE : (page + 1) * STATS_PAGE_SIZE]
-
-    lines = [escape_md(TEXTS["stats_header"]), ""]
-    for task in page_tasks:
-        current = await get_current_streak(repo, task.id)
-        best = await get_max_streak(repo, task.id)
-        lines.append(escape_md(task.name))
-        lines.append(f"🔥 {escape_md(f'Текущий стрик: {current} дней')}")
-        lines.append(f"🏆 {escape_md(f'Лучший стрик: {best} дней')}")
-        lines.append("")
-    return "\n".join(lines).rstrip(), page, total_pages
-
-
-async def _render_stats(
-    repo: Repository,
-    tasks: list[Task],
-    page: int,
-) -> tuple[str, InlineKeyboardMarkup | None]:
-    """Текст страницы статистики + навигационная клавиатура /stats."""
-    text, page, total_pages = await render_stats_page(repo, tasks, page)
-    return text, stats_nav_kb(page, total_pages)
+    for start in range(0, len(images), _ALBUM_MAX):
+        chunk = images[start : start + _ALBUM_MAX]
+        if len(chunk) == 1:
+            await message.answer_photo(
+                BufferedInputFile(chunk[0], filename=f"stats_{start + 1}.png")
+            )
+            continue
+        media = [
+            InputMediaPhoto(
+                media=BufferedInputFile(image, filename=f"stats_{start + offset + 1}.png")
+            )
+            for offset, image in enumerate(chunk)
+        ]
+        await message.answer_media_group(media=media)
 
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, state: FSMContext, repo: Repository) -> None:
-    """Показать статистику."""
+    """Показать статистику альбомом PNG-картинок (по две задачи на картинку)."""
     await state.clear()
     tasks = await stats_tasks(repo, message.from_user.id)
     if not tasks:
         await message.answer(escape_md(TEXTS["stats_no_tasks"]), reply_markup=REMOVE_KB)
         return
-    text, keyboard = await _render_stats(repo, tasks, 0)
-    await message.answer(text, reply_markup=keyboard)
-
-
-@router.callback_query(F.data.startswith("stats_page:"))
-async def stats_paginate(callback: CallbackQuery, repo: Repository) -> None:
-    """Перелистнуть страницу статистики."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    page = int(callback.data.split(":", 1)[1])
-    tasks = await stats_tasks(repo, callback.from_user.id)
-    if not tasks:
-        await callback.message.edit_text(escape_md(TEXTS["stats_no_tasks"]))
-        await callback.answer()
-        return
-    # Кнопки «‹ Назад»/«Далее ›» есть всегда — на краях показываем alert.
-    total_pages = max(1, (len(tasks) + STATS_PAGE_SIZE - 1) // STATS_PAGE_SIZE)
-    if page < 0:
-        await callback.answer(TEXTS["pagination_first"], show_alert=True)
-        return
-    if page >= total_pages:
-        await callback.answer(TEXTS["pagination_last"], show_alert=True)
-        return
-    text, keyboard = await _render_stats(repo, tasks, page)
-    await callback.message.edit_text(text, reply_markup=keyboard)
-    await callback.answer()
+    user = await repo.get_user(message.from_user.id)
+    cards = await _build_cards(repo, tasks, _user_today(user))
+    images = await render_stats_album(cards)
+    await _send_album(message, images)
+    logger.info(
+        "User {} requested /stats: {} task(s), {} image(s)",
+        message.from_user.id, len(tasks), len(images),
+    )

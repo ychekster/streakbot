@@ -233,7 +233,7 @@ def reminder_time_back_kb() -> InlineKeyboardMarkup:
 
 
 # --------------------------------------------------------------------------- #
-#  Inline-клавиатуры удаления и статистики (с пагинацией)
+#  Inline-клавиатуры удаления (с пагинацией)
 # --------------------------------------------------------------------------- #
 
 def _truncate(name: str) -> str:
@@ -289,28 +289,6 @@ def delete_confirm_kb(task_id: int) -> InlineKeyboardMarkup:
                 )
             ],
             [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data="task_delete_cancel")],
-        ]
-    )
-
-
-def stats_nav_kb(page: int, total_pages: int) -> InlineKeyboardMarkup | None:
-    """Навигация по страницам статистики: 0 кнопок (одна страница) или 2 кнопки.
-
-    «‹ Назад» и «Далее ›» показываются всегда (когда страниц больше одной).
-    Если соответствующей страницы нет, при нажатии хендлер показывает alert.
-    """
-    if total_pages <= 1:
-        return None
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=BTN_NAV_PREV, callback_data=f"stats_page:{page - 1}"
-                ),
-                InlineKeyboardButton(
-                    text=BTN_NAV_NEXT, callback_data=f"stats_page:{page + 1}"
-                ),
-            ]
         ]
     )
 
