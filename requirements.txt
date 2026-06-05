@@ -1,4 +1,5 @@
-aiogram>=3.4,<4.0
+# 3.28+ — поддержка поля InlineKeyboardButton.style (цветные кнопки, Bot API 9.4).
+aiogram>=3.28,<4.0
 SQLAlchemy>=2.0,<2.1
 aiosqlite>=0.19.0
 alembic>=1.13.0

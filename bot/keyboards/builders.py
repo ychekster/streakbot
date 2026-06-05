@@ -378,18 +378,20 @@ def task_card_kb(
 ) -> InlineKeyboardMarkup:
     """Клавиатура карточки задачи.
 
-    «Выполнено» с галочкой (☑️/⬜) — только если задача запланирована на сегодня
-    (`is_today`); нажатие переключает статус. Ниже — удаление; в последнем ряду
-    «‹ Назад» к списку (на ту же страницу раздела).
+    «Выполнено» с галочкой (☑️/⬜) и цветом кнопки (зелёная — выполнено, синяя —
+    нет) — только если задача запланирована на сегодня (`is_today`); нажатие
+    переключает статус. Ниже — удаление; в последнем ряду «‹ Назад» к списку
+    (на ту же страницу раздела).
     """
     rows: list[list[InlineKeyboardButton]] = []
     if is_today:
-        mark = _CHECK_ON if is_done else _CHECK_OFF
+        # Статус задачи показываем и галочкой в тексте, и цветом кнопки.
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{mark} {BTN_TASK_DONE}",
+                    text=f"{_task_check_mark(is_done)} {BTN_TASK_DONE}",
                     callback_data=f"tk_done:{section}:{page}:{task_id}",
+                    style=_task_check_style(is_done),
                 )
             ]
         )
@@ -535,8 +537,26 @@ def edit_reminder_menu_kb() -> InlineKeyboardMarkup:
 #  `tm_mark:{origin}`), "md" — отметка вчерашних просроченных (только утро).
 # --------------------------------------------------------------------------- #
 
-_CHECK_ON = "☑️"
-_CHECK_OFF = "⬜"
+# Статус задачи на кнопке-галочке кодируется ДВУМЯ независимыми способами сразу:
+#  1) эмодзи-галочка в тексте кнопки — ☑️ выполнено / ⬜ не выполнено (видна на
+#     любом клиенте);
+#  2) цвет кнопки через поле InlineKeyboardButton.style (Bot API 9.4) — зелёная
+#     («success») выполнено / синяя («primary») не выполнено (на старых клиентах
+#     без поддержки 9.4 цвет дефолтный, но эмодзи-галочка остаётся).
+_CHECK_ON = "☑️"          # галочка — задача выполнена
+_CHECK_OFF = "⬜"          # пустой чек-бокс — задача не выполнена
+_STYLE_TODO = "primary"   # синяя кнопка — задача не выполнена
+_STYLE_DONE = "success"   # зелёная кнопка — задача выполнена
+
+
+def _task_check_mark(is_done: bool) -> str:
+    """Эмодзи-галочка кнопки задачи: ☑️, если выполнена, иначе ⬜."""
+    return _CHECK_ON if is_done else _CHECK_OFF
+
+
+def _task_check_style(is_done: bool) -> str:
+    """Цвет кнопки задачи-галочки: зелёная, если выполнена, иначе синяя."""
+    return _STYLE_DONE if is_done else _STYLE_TODO
 
 
 def _today_mark_button(origin: str, all_done: bool) -> InlineKeyboardButton:
@@ -588,13 +608,15 @@ def today_mark_kb(
     selected: set[int],
     page: int,
 ) -> InlineKeyboardMarkup:
-    """Клавиатура /today: только галочки задач (+ пагинация при >8 задачах).
+    """Клавиатура /today: кнопки задач с галочкой и цветом (+ пагинация при >8).
 
-    Промежуточных кнопок нет — отметка применяется сразу по нажатию. До 8 задач —
-    ряды по 2 без пагинации (до 4 рядов); больше — 6 на странице (3 ряда) плюс ряд
-    пагинации «‹ Назад» / «Далее ›» (alert на краях обрабатывает хендлер). Текущая
-    страница кодируется прямо в callback-data галочек (`today_toggle:{page}:{id}`),
-    поэтому флоу полностью без FSM и переживает рестарт бота.
+    Статус кодируется и галочкой в тексте (☑️/⬜), и цветом кнопки (синяя — не
+    выполнена, зелёная — выполнена). Промежуточных кнопок нет — отметка применяется
+    сразу по нажатию. До 8 задач — ряды по 2 без пагинации (до 4 рядов); больше —
+    6 на странице (3 ряда) плюс ряд пагинации «‹ Назад» / «Далее ›» (alert на краях
+    обрабатывает хендлер). Текущая страница кодируется прямо в callback-data кнопок
+    (`today_toggle:{page}:{id}`), поэтому флоу полностью без FSM и переживает рестарт
+    бота.
     """
     nav_row: list[InlineKeyboardButton] = []
     if len(items) <= TODAY_NO_PAGE_MAX:
@@ -616,8 +638,9 @@ def today_mark_kb(
 
     buttons = [
         InlineKeyboardButton(
-            text=f"{_CHECK_ON if task_id in selected else _CHECK_OFF} {_truncate(name)}",
+            text=f"{_task_check_mark(task_id in selected)} {_truncate(name)}",
             callback_data=f"today_toggle:{page}:{task_id}",
+            style=_task_check_style(task_id in selected),
         )
         for task_id, name in page_items
     ]
@@ -633,12 +656,14 @@ def task_select_kb(
     page: int,
     prefix: str,
 ) -> InlineKeyboardMarkup:
-    """Выбор задач с галочками + «Готово» + «‹ Назад» (к дайджесту).
+    """Выбор задач кнопками с галочкой и цветом + «Готово» + «‹ Назад» (к дайджесту).
 
-    До 6 задач — ряды по 2 (без пагинации). Больше — 4 на странице (2 ряда)
-    и ряд пагинации «‹ Назад» / «Далее ›» (alert на краях). Затем ряд «Готово» и
-    отдельной строкой «‹ Назад» (к дайджесту). Используется флоу отметки
-    сегодняшних (`tm`) и вчерашних просроченных (`md`) задач под дайджестами.
+    Выбор кодируется и галочкой в тексте (☑️/⬜), и цветом кнопки (синяя — не
+    отмечена, зелёная — отмечена). До 6 задач — ряды по 2 (без пагинации). Больше —
+    4 на странице (2 ряда) и ряд пагинации «‹ Назад» / «Далее ›» (alert на краях).
+    Затем ряд «Готово» и отдельной строкой «‹ Назад» (к дайджесту). Используется
+    флоу отметки сегодняшних (`tm`) и вчерашних просроченных (`md`) задач под
+    дайджестами.
     """
     nav_row: list[InlineKeyboardButton] = []
     if len(items) <= OVERDUE_NO_PAGE_MAX:
@@ -659,8 +684,9 @@ def task_select_kb(
 
     buttons = [
         InlineKeyboardButton(
-            text=f"{_CHECK_ON if task_id in selected else _CHECK_OFF} {_truncate(name)}",
+            text=f"{_task_check_mark(task_id in selected)} {_truncate(name)}",
             callback_data=f"{prefix}_toggle:{task_id}",
+            style=_task_check_style(task_id in selected),
         )
         for task_id, name in page_items
     ]
