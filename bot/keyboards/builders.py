@@ -42,6 +42,7 @@ from bot.constants import (
     BTN_REMINDER_NO,
     BTN_REMINDER_YES,
     BTN_RETURN_TASK,
+    BTN_SAVE,
     BTN_UNMARK_TODAY,
     BTN_SETTINGS_EVENING,
     BTN_SETTINGS_MORNING,
@@ -515,16 +516,20 @@ def edit_reminder_menu_kb() -> InlineKeyboardMarkup:
 #  `tm_mark:{origin}`), "md" — отметка вчерашних просроченных (только утро).
 # --------------------------------------------------------------------------- #
 
+# Цвета кнопок через поле InlineKeyboardButton.style (Bot API 9.4). На старых
+# клиентах без поддержки 9.4 цвет дефолтный (механика при этом не страдает).
+_STYLE_BLUE = "primary"    # синяя
+_STYLE_GREEN = "success"   # зелёная
+_STYLE_RED = "danger"      # красная
+
 # Статус задачи на кнопке-галочке кодируется ДВУМЯ независимыми способами сразу:
 #  1) эмодзи-галочка в тексте кнопки — ☑️ выполнено / ⬜ не выполнено (видна на
 #     любом клиенте);
-#  2) цвет кнопки через поле InlineKeyboardButton.style (Bot API 9.4) — зелёная
-#     («success») выполнено / синяя («primary») не выполнено (на старых клиентах
-#     без поддержки 9.4 цвет дефолтный, но эмодзи-галочка остаётся).
-_CHECK_ON = "☑️"          # галочка — задача выполнена
-_CHECK_OFF = "⬜"          # пустой чек-бокс — задача не выполнена
-_STYLE_TODO = "primary"   # синяя кнопка — задача не выполнена
-_STYLE_DONE = "success"   # зелёная кнопка — задача выполнена
+#  2) цвет кнопки — зелёная (выполнено) / синяя (не выполнено).
+_CHECK_ON = "☑️"             # галочка — задача выполнена
+_CHECK_OFF = "⬜"             # пустой чек-бокс — задача не выполнена
+_STYLE_TODO = _STYLE_BLUE    # синяя кнопка — задача не выполнена
+_STYLE_DONE = _STYLE_GREEN   # зелёная кнопка — задача выполнена
 
 
 def _task_check_mark(is_done: bool) -> str:
@@ -548,11 +553,6 @@ def _today_mark_button(origin: str, all_done: bool) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=f"tm_mark:{origin}")
 
 
-def _overdue_button() -> InlineKeyboardButton:
-    """Кнопка «Отметить вчерашние задачи» (вход в флоу просроченных)."""
-    return InlineKeyboardButton(text=BTN_MARK_OVERDUE, callback_data="md_mark")
-
-
 def evening_digest_kb(has_tasks: bool, all_done: bool) -> InlineKeyboardMarkup | None:
     """Клавиатура вечернего итога: кнопка отметки сегодняшних задач (если они есть)."""
     if not has_tasks:
@@ -564,20 +564,32 @@ def evening_digest_kb(has_tasks: bool, all_done: bool) -> InlineKeyboardMarkup |
 
 def morning_digest_kb(
     has_today_tasks: bool,
-    all_today_done: bool,
     has_overdue: bool,
+    origin: str,
 ) -> InlineKeyboardMarkup | None:
     """Клавиатура утреннего дайджеста.
 
-    Сверху — кнопка отметки сегодняшних задач (если они есть), ниже — кнопка
-    отметки вчерашних просроченных (если они есть). Если нет ни тех, ни других —
-    клавиатуры нет.
+    Сверху — синяя кнопка «Отметить выполненные» (вход в /today-вид отметки
+    сегодняшних задач, `dm_mark:{origin}`), если такие задачи есть; ниже — красная
+    кнопка «Отметить вчерашние задачи» (`md_mark`), если есть просроченные. Если нет
+    ни тех, ни других — клавиатуры нет.
+
+    `origin` — версия дайджеста, которую несёт кнопка сегодняшних задач, чтобы
+    «Назад» из их отметки вернул РОВНО к ней: "d" — обычный дайджест (с возможным
+    блоком/кнопкой просроченных), "f" — финальный вид без просроченных (после
+    подтверждения). Так кнопка просроченных не возвращается после прохождения флоу.
     """
     rows: list[list[InlineKeyboardButton]] = []
     if has_today_tasks:
-        rows.append([_today_mark_button("morning", all_today_done)])
+        rows.append(
+            [InlineKeyboardButton(
+                text=BTN_MARK_TODAY, callback_data=f"dm_mark:{origin}", style=_STYLE_BLUE
+            )]
+        )
     if has_overdue:
-        rows.append([_overdue_button()])
+        rows.append(
+            [InlineKeyboardButton(text=BTN_MARK_OVERDUE, callback_data="md_mark", style=_STYLE_RED)]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
@@ -585,16 +597,26 @@ def today_mark_kb(
     items: list[tuple[int, str]],
     selected: set[int],
     page: int,
+    *,
+    toggle_cb: str = "today_toggle",
+    page_cb: str = "today_page",
+    back_cb: str | None = None,
 ) -> InlineKeyboardMarkup:
-    """Клавиатура /today: кнопки задач с галочкой и цветом (+ пагинация при >8).
+    """Клавиатура отметки сегодняшних задач галочками (механика автосохранения).
 
     Статус кодируется и галочкой в тексте (☑️/⬜), и цветом кнопки (синяя — не
     выполнена, зелёная — выполнена). Промежуточных кнопок нет — отметка применяется
     сразу по нажатию. До 8 задач — ряды по 2 без пагинации (до 4 рядов); больше —
     6 на странице (3 ряда) плюс ряд пагинации «‹ Назад» / «Далее ›» (alert на краях
     обрабатывает хендлер). Текущая страница кодируется прямо в callback-data кнопок
-    (`today_toggle:{page}:{id}`), поэтому флоу полностью без FSM и переживает рестарт
+    (`{toggle_cb}:{page}:{id}`), поэтому флоу полностью без FSM и переживает рестарт
     бота.
+
+    `toggle_cb`/`page_cb` задают пространство callback-data: по умолчанию — команда
+    /today (`today_toggle`/`today_page`); утренний дайджест передаёт сюда префиксы
+    с origin (`dm_toggle:{origin}` и т.п.). Если задан `back_cb`, последним рядом
+    добавляется красная кнопка «‹ Назад» (в дайджесте — возврат к нему), что даёт
+    максимум 5 рядов вместо 4.
     """
     nav_row: list[InlineKeyboardButton] = []
     if len(items) <= TODAY_NO_PAGE_MAX:
@@ -607,17 +629,17 @@ def today_mark_kb(
         page_items = items[start : start + TODAY_PAGE_SIZE]
         nav_row = [
             InlineKeyboardButton(
-                text=BTN_NAV_PREV, callback_data=f"today_page:{page - 1}"
+                text=BTN_NAV_PREV, callback_data=f"{page_cb}:{page - 1}"
             ),
             InlineKeyboardButton(
-                text=BTN_NAV_NEXT, callback_data=f"today_page:{page + 1}"
+                text=BTN_NAV_NEXT, callback_data=f"{page_cb}:{page + 1}"
             ),
         ]
 
     buttons = [
         InlineKeyboardButton(
             text=f"{_task_check_mark(task_id in selected)} {_truncate(name)}",
-            callback_data=f"today_toggle:{page}:{task_id}",
+            callback_data=f"{toggle_cb}:{page}:{task_id}",
             style=_task_check_style(task_id in selected),
         )
         for task_id, name in page_items
@@ -625,7 +647,33 @@ def today_mark_kb(
     rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
     if nav_row:
         rows.append(nav_row)
+    if back_cb is not None:
+        rows.append(
+            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data=back_cb, style=_STYLE_RED)]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def morning_today_mark_kb(
+    items: list[tuple[int, str]],
+    selected: set[int],
+    page: int,
+    origin: str,
+) -> InlineKeyboardMarkup:
+    """Отметка сегодняшних задач из утреннего дайджеста: как /today + красная «Назад».
+
+    Та же механика галочек с автосохранением, что и в /today, но callback-data в
+    пространстве "dm" с `origin` — версией дайджеста, из которой вошли ("d" — обычный
+    дайджест с возможным блоком просроченных, "f" — финальный вид без просроченных).
+    Красная кнопка «‹ Назад» (`dm_back:{origin}`) возвращает РОВНО к этой версии.
+    Максимум 5 рядов.
+    """
+    return today_mark_kb(
+        items, selected, page,
+        toggle_cb=f"dm_toggle:{origin}",
+        page_cb=f"dm_page:{origin}",
+        back_cb=f"dm_back:{origin}",
+    )
 
 
 def task_select_kb(
@@ -633,15 +681,21 @@ def task_select_kb(
     selected: set[int],
     page: int,
     prefix: str,
+    *,
+    done_text: str = BTN_DONE,
+    done_style: str | None = None,
+    back_style: str | None = None,
 ) -> InlineKeyboardMarkup:
-    """Выбор задач кнопками с галочкой и цветом + «Готово» + «‹ Назад» (к дайджесту).
+    """Выбор задач кнопками с галочкой и цветом + кнопка-завершение + «‹ Назад».
 
     Выбор кодируется и галочкой в тексте (☑️/⬜), и цветом кнопки (синяя — не
     отмечена, зелёная — отмечена). До 6 задач — ряды по 2 (без пагинации). Больше —
     4 на странице (2 ряда) и ряд пагинации «‹ Назад» / «Далее ›» (alert на краях).
-    Затем ряд «Готово» и отдельной строкой «‹ Назад» (к дайджесту). Используется
-    флоу отметки сегодняшних (`tm`) и вчерашних просроченных (`md`) задач под
-    дайджестами.
+    Затем ряд кнопки-завершения и отдельной строкой «‹ Назад» (к дайджесту).
+    Используется флоу отметки сегодняшних (`tm`, вечер) и вчерашних просроченных
+    (`md`, утро) задач. Текст и цвет кнопки-завершения и цвет «‹ Назад»
+    параметризуются (`done_text`/`done_style`/`back_style`): для просроченных —
+    «Сохранить» и красные цвета (см. `overdue_select_kb`).
     """
     nav_row: list[InlineKeyboardButton] = []
     if len(items) <= OVERDUE_NO_PAGE_MAX:
@@ -671,28 +725,64 @@ def task_select_kb(
     rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
     if nav_row:
         rows.append(nav_row)
-    rows.append([InlineKeyboardButton(text=BTN_DONE, callback_data=f"{prefix}_done")])
     rows.append(
-        [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data=f"{prefix}_back_digest")]
+        [InlineKeyboardButton(text=done_text, callback_data=f"{prefix}_done", style=done_style)]
+    )
+    rows.append(
+        [InlineKeyboardButton(
+            text=BTN_TODAY_BACK, callback_data=f"{prefix}_back_digest", style=back_style
+        )]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def select_confirm_kb(prefix: str) -> InlineKeyboardMarkup:
-    """Экран подтверждения: «Подтвердить», затем «‹ Назад» отдельной строкой."""
+def overdue_select_kb(
+    items: list[tuple[int, str]],
+    selected: set[int],
+    page: int,
+) -> InlineKeyboardMarkup:
+    """Выбор просроченных задач (утро): галочки + «Сохранить» (красная) + «‹ Назад» (красная)."""
+    return task_select_kb(
+        items, selected, page, "md",
+        done_text=BTN_SAVE, done_style=_STYLE_RED, back_style=_STYLE_RED,
+    )
+
+
+def select_confirm_kb(
+    prefix: str,
+    *,
+    confirm_style: str | None = None,
+    back_style: str | None = None,
+) -> InlineKeyboardMarkup:
+    """Экран подтверждения: «Подтвердить», затем «‹ Назад» отдельной строкой.
+
+    Цвета кнопок параметризуются (`confirm_style`/`back_style`): для просроченных —
+    зелёная «Подтвердить» и красная «‹ Назад» (см. `overdue_confirm_kb`).
+    """
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=BTN_CONFIRM, callback_data=f"{prefix}_confirm")],
-            [InlineKeyboardButton(text=BTN_TODAY_BACK, callback_data=f"{prefix}_back_select")],
+            [InlineKeyboardButton(
+                text=BTN_CONFIRM, callback_data=f"{prefix}_confirm", style=confirm_style
+            )],
+            [InlineKeyboardButton(
+                text=BTN_TODAY_BACK, callback_data=f"{prefix}_back_select", style=back_style
+            )],
         ]
     )
 
 
+def overdue_confirm_kb() -> InlineKeyboardMarkup:
+    """Подтверждение просроченных (утро): «Подтвердить» (зелёная) + «‹ Назад» (красная)."""
+    return select_confirm_kb("md", confirm_style=_STYLE_GREEN, back_style=_STYLE_RED)
+
+
 def overdue_expired_kb() -> InlineKeyboardMarkup:
-    """Экран «время вышло» (утренний дайджест): единственная кнопка «Подтвердить»."""
+    """Экран «время вышло» (утренний дайджест): единственная синяя кнопка «Подтвердить»."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=BTN_CONFIRM, callback_data="md_expired_ok")]
+            [InlineKeyboardButton(
+                text=BTN_CONFIRM, callback_data="md_expired_ok", style=_STYLE_BLUE
+            )]
         ]
     )
 
