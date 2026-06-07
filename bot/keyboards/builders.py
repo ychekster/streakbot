@@ -504,6 +504,28 @@ def _task_check_style(is_done: bool) -> str:
     return _STYLE_DONE if is_done else _STYLE_TODO
 
 
+def shown_check_state(
+    markup: InlineKeyboardMarkup | None, callback_data: str
+) -> bool | None:
+    """Отображаемое СЕЙЧАС состояние кнопки-галочки по её callback_data.
+
+    Возвращает True (☑️ выполнено) / False (⬜ не выполнено), читая текущую клавиатуру
+    сообщения — то есть то, что в момент нажатия видит пользователь. Нужна, чтобы
+    отметку применять относительно показанного состояния, а не статуса в БД: тогда
+    «устаревшая» кнопка (статус задачи успели изменить из другого места — например,
+    через напоминание или /today) при нажатии просто синхронизируется с актуальным
+    значением, без конфликта и ошибки. None — если кнопки с такой callback_data в
+    клавиатуре нет (определить показанное состояние не удалось).
+    """
+    if markup is None:
+        return None
+    for row in markup.inline_keyboard:
+        for button in row:
+            if button.callback_data == callback_data:
+                return button.text.startswith(_CHECK_ON)
+    return None
+
+
 def evening_digest_kb(origin: str) -> InlineKeyboardMarkup:
     """Клавиатура вечернего дайджеста: синяя кнопка «Отметить выполненные».
 

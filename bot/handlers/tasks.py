@@ -21,6 +21,7 @@ from datetime import date, datetime
 
 import pytz
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
@@ -31,6 +32,7 @@ from bot.database.models import FrequencyType, Task, TaskStatus
 from bot.database.repository import Repository
 from bot.handlers.stats import stats_tasks
 from bot.keyboards.builders import (
+    shown_check_state,
     task_card_kb,
     task_delete_confirm_kb,
     tasks_list_kb,
@@ -63,6 +65,34 @@ async def _user_tz(repo: Repository, user_id: int) -> pytz.BaseTzInfo:
 async def _user_today(repo: Repository, user_id: int) -> date:
     """Текущая дата в часовом поясе пользователя (UTC как фолбэк)."""
     return datetime.now(await _user_tz(repo, user_id)).date()
+
+
+def _target_status(shown_done: bool | None, current: TaskStatus) -> TaskStatus:
+    """Целевой статус кнопки «Выполнено» в карточке /tasks.
+
+    `shown_done` — что показывала нажатая кнопка (☑️/⬜), считанное из текущей
+    клавиатуры. Целевой статус — противоположный показанному, поэтому «устаревшая»
+    кнопка (статус успели изменить из другого места) при нажатии просто
+    синхронизируется с актуальным значением, а не вызывает конфликт. Если показанное
+    состояние неизвестно (`None`) — переключаем относительно БД (обычный тоггл).
+    """
+    if shown_done is None:
+        return TaskStatus.pending if current == TaskStatus.done else TaskStatus.done
+    return TaskStatus.pending if shown_done else TaskStatus.done
+
+
+async def _safe_edit_text(message: Message, text: str, reply_markup) -> None:
+    """`edit_text`, проглатывающий безвредную ошибку «message is not modified».
+
+    При конфликте состояний (например, гонка двойного нажатия) новый вид карточки
+    может совпасть с текущим — Telegram ответит «message is not modified». В этом
+    контексте это не ошибка: карточка и так показывает актуальные данные, игнорируем.
+    """
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
 
 
 def _freq_str(task: Task) -> str:
@@ -239,8 +269,10 @@ async def _show_card(
         log = await repo.get_log(task.id, today)
         is_done = log is not None and log.status == TaskStatus.done
     text = await _card_text(repo, task, tz)
-    await callback.message.edit_text(
-        text, reply_markup=task_card_kb(section, page, task.id, is_today, is_done)
+    await _safe_edit_text(
+        callback.message,
+        text,
+        task_card_kb(section, page, task.id, is_today, is_done),
     )
 
 
@@ -270,7 +302,12 @@ async def tk_card(callback: CallbackQuery, repo: Repository) -> None:
 
 @router.callback_query(F.data.startswith("tk_done:"))
 async def tk_done(callback: CallbackQuery, repo: Repository) -> None:
-    """Кнопка «Выполнено» — переключить статус сегодняшнего лога и обновить карточку."""
+    """Кнопка «Выполнено» — применить отметку сегодняшнего лога и обновить карточку.
+
+    Отметка применяется относительно состояния, показанного на кнопке (а не статуса в
+    БД), поэтому «устаревшая» кнопка (статус успели изменить из другого места) при
+    нажатии тихо синхронизируется с актуальным значением — без конфликта и ошибки.
+    """
     if callback.message is None:
         await callback.answer()
         return
@@ -287,14 +324,14 @@ async def tk_done(callback: CallbackQuery, repo: Repository) -> None:
         await _show_card(callback, repo, section, page, task)
         return
     log = await repo.get_or_create_log(task_id, callback.from_user.id, today)
-    new_status = (
-        TaskStatus.pending if log.status == TaskStatus.done else TaskStatus.done
-    )
-    await repo.set_log_status(log, new_status)
-    logger.info(
-        "User {} toggled task {} -> {} via /tasks card",
-        callback.from_user.id, task_id, new_status.value,
-    )
+    shown_done = shown_check_state(callback.message.reply_markup, callback.data)
+    target = _target_status(shown_done, log.status)
+    if log.status != target:
+        await repo.set_log_status(log, target)
+        logger.info(
+            "User {} marked task {} -> {} via /tasks card",
+            callback.from_user.id, task_id, target.value,
+        )
     await _show_card(callback, repo, section, page, task)
     await callback.answer()
 

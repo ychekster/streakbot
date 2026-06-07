@@ -37,6 +37,7 @@ from datetime import date, datetime, time, timedelta
 
 import pytz
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -55,6 +56,7 @@ from bot.keyboards.builders import (
     overdue_expired_kb,
     overdue_select_kb,
     reminder_kb,
+    shown_check_state,
     today_mark_kb,
 )
 from bot.utils.validators import escape_md
@@ -92,6 +94,56 @@ def _user_tz(user: User) -> pytz.BaseTzInfo:
         return pytz.timezone(user.timezone) if user.timezone else pytz.utc
     except Exception:  # noqa: BLE001
         return pytz.utc
+
+
+# --------------------------------------------------------------------------- #
+#  Бесконфликтная отметка задач
+#
+#  Одну задачу можно отметить из разных мест (напоминание, /today, дайджесты,
+#  карточка /tasks). Чтобы «устаревшая» кнопка (статус успели изменить из другого
+#  места) не вызывала конфликт и ошибку, отметка применяется относительно состояния,
+#  ПОКАЗАННОГО на нажатой кнопке (`shown_check_state`), а не статуса в БД: целевой
+#  статус — противоположный показанному. Тогда свежая кнопка переключает статус, а
+#  устаревшая просто синхронизируется с актуальным значением (целевой статус уже в
+#  БД — записи нет). Редактирование вида делается «безопасно» (`_safe_edit_*`): если
+#  при гонке новый вид совпал с текущим, Telegram вернёт «message is not modified» —
+#  в этом контексте это не ошибка, и мы её проглатываем.
+# --------------------------------------------------------------------------- #
+
+def _target_status(shown_done: bool | None, current: TaskStatus) -> TaskStatus:
+    """Целевой статус отметки задачи.
+
+    `shown_done` — что показывала нажатая кнопка (☑️=True / ⬜=False), считанное из
+    текущей клавиатуры. Целевой статус — противоположный показанному. Если показанное
+    состояние неизвестно (`None`, кнопку не нашли) — переключаем относительно БД
+    (обычный тоггл как фолбэк).
+    """
+    if shown_done is None:
+        return TaskStatus.pending if current == TaskStatus.done else TaskStatus.done
+    return TaskStatus.pending if shown_done else TaskStatus.done
+
+
+async def _safe_edit_text(message: Message, text: str, reply_markup) -> None:
+    """`edit_text`, проглатывающий безвредную ошибку «message is not modified».
+
+    Конфликт состояний (в т.ч. гонка двойного нажатия) может привести к тому, что
+    новый вид совпадёт с текущим — Telegram ответит «message is not modified». Здесь
+    это не ошибка: сообщение и так показывает актуальные данные, поэтому игнорируем.
+    """
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+
+
+async def _safe_edit_markup(message: Message, reply_markup) -> None:
+    """`edit_reply_markup`, проглатывающий безвредную ошибку «message is not modified»."""
+    try:
+        await message.edit_reply_markup(reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
 
 
 async def _today_tasks(
@@ -551,27 +603,30 @@ async def _today_ordered(
     return await _today_marking_tasks(repo, user, today)
 
 
-async def _toggle_today_log(
-    repo: Repository, user: User, today, task_id: int
+async def _apply_today_mark(
+    repo: Repository, user: User, today, task_id: int, shown_done: bool | None
 ) -> bool:
-    """Переключить статус сегодняшнего лога задачи (done ↔ pending) с автосохранением.
+    """Отметить/снять сегодняшнюю задачу относительно ПОКАЗАННОГО состояния кнопки.
 
+    `shown_done` — что отображала нажатая кнопка (☑️/⬜), считанное из текущей
+    клавиатуры. Целевой статус — противоположный показанному (`_target_status`):
+    - свежая кнопка (показанное совпадает с БД) → статус переключается;
+    - устаревшая кнопка (статус уже изменили из другого места) → целевой статус уже
+      в БД, записи не происходит — просто синхронизируем вид без конфликта.
     Возвращает False, если задачи нет среди сегодняшних (удалена или больше не на
-    сегодня) — тогда ничего не меняем. Общая механика для команды /today и для вида
-    отметки сегодняшних задач в утреннем дайджесте (dm_*).
+    сегодня) — тогда ничего не меняем. Общая механика для команды /today и для
+    отметки сегодняшних задач в дайджесте (dm_*).
     """
     ordered, _ = await _today_ordered(repo, user, today)
     if task_id not in {task.id for task in ordered}:
         return False
     log = await repo.get_or_create_log(task_id, user.telegram_id, today)
-    new_status = (
-        TaskStatus.pending if log.status == TaskStatus.done else TaskStatus.done
-    )
-    await repo.set_log_status(log, new_status)
-    logger.info(
-        "User {} toggled today task {} (now {})",
-        user.telegram_id, task_id, new_status.name,
-    )
+    target = _target_status(shown_done, log.status)
+    if log.status != target:
+        await repo.set_log_status(log, target)
+        logger.info(
+            "User {} marked today task {} -> {}", user.telegram_id, task_id, target.name
+        )
     return True
 
 
@@ -622,10 +677,12 @@ async def today_open(callback: CallbackQuery, repo: Repository) -> None:
 
 @router.callback_query(F.data.startswith("today_toggle:"))
 async def today_toggle(callback: CallbackQuery, repo: Repository) -> None:
-    """Нажатие на галочку /today: сразу переключить статус задачи в БД и перестроить вид.
+    """Нажатие на галочку /today: применить отметку в БД и перестроить вид.
 
-    Без FSM: статус берётся из БД и тут же меняется (done ↔ pending), страница
-    приходит в callback-data. Поэтому кнопки работают и после рестарта бота.
+    Без FSM: отметка применяется относительно состояния, показанного на кнопке
+    (а не статуса в БД), поэтому «устаревшая» кнопка тихо синхронизируется с
+    актуальным статусом без конфликта. Страница приходит в callback-data, кнопки
+    работают и после рестарта бота.
     """
     if callback.message is None:
         await callback.answer()
@@ -635,15 +692,17 @@ async def today_toggle(callback: CallbackQuery, repo: Repository) -> None:
     page, task_id = int(page_raw), int(task_id_raw)
     user = await repo.get_user(callback.from_user.id)
     today = datetime.now(_user_tz(user)).date()
-    if not await _toggle_today_log(repo, user, today, task_id):
+    shown_done = shown_check_state(callback.message.reply_markup, callback.data)
+    if not await _apply_today_mark(repo, user, today, task_id, shown_done):
         # Задача исчезла (удалена) или больше не на сегодня — ничего не меняем.
         await callback.answer()
         return
-    # Пересчитываем порядок и галочки после изменения и перерисовываем сообщение.
+    # Пересчитываем порядок и галочки по актуальной БД и перерисовываем сообщение.
     ordered, done_ids = await _today_marking_tasks(repo, user, today)
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         _today_view_text(ordered, done_ids),
-        reply_markup=today_mark_kb([(t.id, t.name) for t in ordered], done_ids, page),
+        today_mark_kb([(t.id, t.name) for t in ordered], done_ids, page),
     )
     await callback.answer()
 
@@ -736,7 +795,11 @@ async def dm_mark(callback: CallbackQuery, repo: Repository) -> None:
 
 @router.callback_query(F.data.startswith("dm_toggle:"))
 async def dm_toggle(callback: CallbackQuery, repo: Repository) -> None:
-    """Галочка в дайджесте: сразу переключить статус задачи в БД и перестроить вид."""
+    """Галочка в дайджесте: применить отметку в БД и перестроить вид.
+
+    Как и в /today, отметка применяется относительно показанного на кнопке состояния
+    (а не статуса в БД), поэтому «устаревшая» кнопка тихо синхронизируется без конфликта.
+    """
     if callback.message is None:
         await callback.answer()
         return
@@ -750,16 +813,16 @@ async def dm_toggle(callback: CallbackQuery, repo: Repository) -> None:
     page, task_id = int(page_raw), int(task_id_raw)
     user = await repo.get_user(callback.from_user.id)
     today = datetime.now(_user_tz(user)).date()
-    if not await _toggle_today_log(repo, user, today, task_id):
+    shown_done = shown_check_state(callback.message.reply_markup, callback.data)
+    if not await _apply_today_mark(repo, user, today, task_id, shown_done):
         # Задача исчезла (удалена) или больше не на сегодня — ничего не меняем.
         await callback.answer()
         return
     ordered, done_ids = await _today_marking_tasks(repo, user, today)
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         _today_view_text(ordered, done_ids),
-        reply_markup=digest_today_mark_kb(
-            [(t.id, t.name) for t in ordered], done_ids, page, origin
-        ),
+        digest_today_mark_kb([(t.id, t.name) for t in ordered], done_ids, page, origin),
     )
     await callback.answer()
 
@@ -845,12 +908,13 @@ async def build_reminder(
 
 @router.callback_query(F.data.startswith("rem_done:"))
 async def reminder_toggle(callback: CallbackQuery, repo: Repository) -> None:
-    """Нажатие на кнопку-галочку напоминания: переключить статус задачи в БД (как /today).
+    """Нажатие на кнопку-галочку напоминания: применить отметку в БД (как /today).
 
-    Стандартная механика отметки: нажатие переключает статус задачи за дату
-    напоминания (done ↔ pending) и перерисовывает только кнопку (синяя ⬜ ↔ зелёная
-    ☑️). Текст сообщения не меняется, кнопка не пропадает. Если задача удалена —
-    отметить нельзя, сообщаем об этом alert'ом, кнопку оставляем как есть.
+    Отметка применяется относительно состояния, показанного на кнопке (а не статуса в
+    БД): синяя ⬜ ↔ зелёная ☑️. Если задачу уже отметили из другого места, «устаревшая»
+    кнопка просто синхронизируется с актуальным статусом — без конфликта и ошибки.
+    Текст сообщения не меняется, кнопка не пропадает. Если задача удалена — отметить
+    нельзя, сообщаем об этом alert'ом, кнопку оставляем как есть.
     """
     if callback.message is None:
         await callback.answer()
@@ -865,16 +929,16 @@ async def reminder_toggle(callback: CallbackQuery, repo: Repository) -> None:
         return
     user = await repo.get_user(callback.from_user.id)
     log = await repo.get_or_create_log(task_id, user.telegram_id, target_date)
-    new_status = (
-        TaskStatus.pending if log.status == TaskStatus.done else TaskStatus.done
-    )
-    await repo.set_log_status(log, new_status)
-    is_done = new_status == TaskStatus.done
-    logger.info(
-        "User {} toggled task {} (now {}) via reminder",
-        user.telegram_id, task_id, new_status.name,
-    )
-    await callback.message.edit_reply_markup(
-        reply_markup=reminder_kb(task_id, target_date, task.name, is_done)
+    shown_done = shown_check_state(callback.message.reply_markup, callback.data)
+    target = _target_status(shown_done, log.status)
+    if log.status != target:
+        await repo.set_log_status(log, target)
+        logger.info(
+            "User {} marked task {} -> {} via reminder",
+            user.telegram_id, task_id, target.name,
+        )
+    is_done = target == TaskStatus.done
+    await _safe_edit_markup(
+        callback.message, reminder_kb(task_id, target_date, task.name, is_done)
     )
     await callback.answer()
