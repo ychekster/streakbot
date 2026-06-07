@@ -43,7 +43,6 @@ from bot.constants import (
     BTN_REMINDER_YES,
     BTN_RETURN_TASK,
     BTN_SAVE,
-    BTN_UNMARK_TODAY,
     BTN_SETTINGS_EVENING,
     BTN_SETTINGS_MORNING,
     BTN_SETTINGS_TIMEZONE,
@@ -510,10 +509,11 @@ def edit_reminder_menu_kb() -> InlineKeyboardMarkup:
 #  Inline-клавиатуры интерактивной отметки задач (утренний/вечерний дайджест)
 #
 #  Под дайджестом — inline-кнопки отметки. По нажатию текущее сообщение
-#  редактируется в экран выбора задач — всё в рамках одного сообщения, новых
-#  сообщений не отправляется. Экран выбора параметризован префиксом callback-data:
-#  "tm" — отметка сегодняшних задач (общий флоу утра и вечера, callback входа
-#  `tm_mark:{origin}`), "md" — отметка вчерашних просроченных (только утро).
+#  редактируется — всё в рамках одного сообщения, новых сообщений не отправляется.
+#  Отметка сегодняшних задач у обоих дайджестов — флоу `dm_*` (галочки с
+#  автосохранением, как /today; см. `digest_today_mark_kb`). Отметка вчерашних
+#  просроченных (только утро) — флоу `md_*` с выбором и подтверждением
+#  (`task_select_kb`/`select_confirm_kb` через обёртки `overdue_*`).
 # --------------------------------------------------------------------------- #
 
 # Цвета кнопок через поле InlineKeyboardButton.style (Bot API 9.4). На старых
@@ -542,23 +542,19 @@ def _task_check_style(is_done: bool) -> str:
     return _STYLE_DONE if is_done else _STYLE_TODO
 
 
-def _today_mark_button(origin: str, all_done: bool) -> InlineKeyboardButton:
-    """Кнопка отметки сегодняшних задач.
+def evening_digest_kb(origin: str) -> InlineKeyboardMarkup:
+    """Клавиатура вечернего дайджеста: синяя кнопка «Отметить выполненные».
 
-    Текст — «Отменить выполнение», если все задачи уже выполнены, иначе
-    «Отметить выполненные». `origin` ("morning"/"evening") уходит в callback-data,
-    чтобы флоу знал, к какому дайджесту возвращаться.
+    Открывает тот же /today-вид отметки сегодняшних задач с автосохранением, что и
+    утренний дайджест (флоу `dm_mark:{origin}`); `origin` несёт версию дайджеста для
+    возврата по «‹ Назад» (для вечернего — "e").
     """
-    text = BTN_UNMARK_TODAY if all_done else BTN_MARK_TODAY
-    return InlineKeyboardButton(text=text, callback_data=f"tm_mark:{origin}")
-
-
-def evening_digest_kb(has_tasks: bool, all_done: bool) -> InlineKeyboardMarkup | None:
-    """Клавиатура вечернего итога: кнопка отметки сегодняшних задач (если они есть)."""
-    if not has_tasks:
-        return None
     return InlineKeyboardMarkup(
-        inline_keyboard=[[_today_mark_button("evening", all_done)]]
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text=BTN_MARK_TODAY, callback_data=f"dm_mark:{origin}", style=_STYLE_BLUE
+            )
+        ]]
     )
 
 
@@ -654,19 +650,20 @@ def today_mark_kb(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def morning_today_mark_kb(
+def digest_today_mark_kb(
     items: list[tuple[int, str]],
     selected: set[int],
     page: int,
     origin: str,
 ) -> InlineKeyboardMarkup:
-    """Отметка сегодняшних задач из утреннего дайджеста: как /today + красная «Назад».
+    """Отметка сегодняшних задач из дайджеста (утреннего или вечернего): как /today
+    + красная «Назад».
 
     Та же механика галочек с автосохранением, что и в /today, но callback-data в
     пространстве "dm" с `origin` — версией дайджеста, из которой вошли ("d" — обычный
-    дайджест с возможным блоком просроченных, "f" — финальный вид без просроченных).
-    Красная кнопка «‹ Назад» (`dm_back:{origin}`) возвращает РОВНО к этой версии.
-    Максимум 5 рядов.
+    утренний дайджест с возможным блоком просроченных, "f" — финальный вид без
+    просроченных, "e" — вечерний дайджест). Красная кнопка «‹ Назад»
+    (`dm_back:{origin}`) возвращает РОВНО к этой версии. Максимум 5 рядов.
     """
     return today_mark_kb(
         items, selected, page,

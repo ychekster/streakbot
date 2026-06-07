@@ -5,17 +5,13 @@
 также команда `/today` — список задач на сегодня сразу с галочками (отметка
 применяется по нажатию). Отдельной команды `/done` нет.
 
-Отметка сегодняшних задач различается у двух дайджестов:
-
-- **Утренний** (`dm_*`): синяя кнопка «Отметить выполненные» редактирует сообщение
-  в тот же вид, что и /today — галочки с автосохранением (нажатие сразу пишет
-  статус в БД), плюс красная кнопка «‹ Назад». Без FSM, без «Готово» и
-  подтверждения. Все шаги несут origin — версию дайджеста, из которой вошли
-  ("d" — обычный, "f" — финальный без просроченных); «‹ Назад» (`dm_back:{origin}`)
-  возвращает РОВНО к этой версии.
-- **Вечерний** (`tm_*`): по нажатию сообщение редактируется в экран выбора с
-  «Готово» → подтверждение → «Подтвердить» (фиксирует новый статус всех задач).
-  Этот флоу остаётся прежним и здесь не менялся.
+Отметка сегодняшних задач у обоих дайджестов работает одинаково — флоу `dm_*`:
+синяя кнопка «Отметить выполненные» редактирует сообщение в тот же вид, что и
+/today (галочки с автосохранением, нажатие сразу пишет статус в БД), плюс красная
+кнопка «‹ Назад». Без FSM, без «Готово» и подтверждения. Все шаги несут origin —
+версию дайджеста, из которой вошли ("d" — обычный утренний, "f" — финальный вид
+утреннего без просроченных, "e" — вечерний); «‹ Назад» (`dm_back:{origin}`)
+возвращает РОВНО к этой версии.
 
 Утренний дайджест дополнительно несёт красную кнопку отметки вчерашних
 просроченных задач (`md_*`): экран выбора → «Сохранить» → подтверждение →
@@ -24,12 +20,11 @@
 в т.ч. при «‹ Назад» из отметки сегодняшних задач. Логика определения просроченных
 (`_tasks_for_date_not_done`) при этом не меняется.
 
-Защита от «устаревших» кнопок: флоу `tm_*` и `md_*` многошаговые, поэтому их вход
-(`tm_mark`/`md_mark`) выставляет FSM-состояние `MarkingStates.active`, требуемое
-всеми последующими шагами (если команда сбросила FSM, нажатия на старом сообщении
-ничего не делают). Флоу `dm_*` без FSM: он идемпотентен (toggle переключает статус
-в БД, страница — в callback-data), поэтому защита состоянием ему не нужна, и кнопки
-работают даже после рестарта.
+Защита от «устаревших» кнопок: многошаговый флоу `md_*` выставляет FSM-состояние
+`MarkingStates.active`, требуемое всеми его шагами (если команда сбросила FSM,
+нажатия на старом сообщении ничего не делают). Флоу `dm_*` без FSM: он идемпотентен
+(toggle переключает статус в БД, страница и origin — в callback-data), поэтому
+защита состоянием ему не нужна, и кнопки работают даже после рестарта.
 """
 
 from __future__ import annotations
@@ -49,42 +44,37 @@ from bot.database.models import Task, TaskLog, TaskStatus, User
 from bot.database.repository import Repository
 from bot.keyboards.builders import (
     REMOVE_KB,
+    digest_today_mark_kb,
     evening_digest_kb,
     morning_digest_kb,
-    morning_today_mark_kb,
     overdue_confirm_kb,
     overdue_expired_kb,
     overdue_select_kb,
-    select_confirm_kb,
-    task_select_kb,
     today_mark_kb,
 )
 from bot.utils.validators import escape_md
 
 router = Router(name="today")
 
-# Источники флоу отметки сегодняшних задач (origin в callback/FSM): кнопка под
-# утренним или вечерним дайджестом — возврат ведёт к соответствующему дайджесту.
-_ORIGIN_MORNING = "morning"
-_ORIGIN_EVENING = "evening"
-
-# Версия утреннего дайджеста, из которой вошли в отметку сегодняшних задач (флоу
-# `dm_*`). Несётся в callback-data, чтобы «‹ Назад» вернул РОВНО к ней:
-#   "d" — обычный дайджест (с возможным блоком/кнопкой просроченных);
-#   "f" — финальный вид без просроченных (после прохождения флоу просроченных).
-# Так кнопка просроченных не появляется снова после того, как пользователь её прошёл.
+# Версия дайджеста, из которой вошли в отметку сегодняшних задач (флоу `dm_*`).
+# Несётся в callback-data, чтобы «‹ Назад» вернул РОВНО к ней:
+#   "d" — обычный утренний дайджест (с возможным блоком/кнопкой просроченных);
+#   "f" — финальный вид утреннего дайджеста без просроченных (после прохождения
+#         флоу просроченных) — так кнопка просроченных снова не появляется;
+#   "e" — вечерний дайджест.
 _DM_DIGEST = "d"
 _DM_FINAL = "f"
+_DM_EVENING = "e"
 
 
 class MarkingStates(StatesGroup):
-    """Активный флоу интерактивной отметки (today `tm_*` или overdue `md_*`).
+    """Активный флоу отметки вчерашних просроченных задач (`md_*`).
 
-    Состояние выставляется при входе (`tm_mark`/`md_mark`, которые остаются без
-    фильтра состояния — чтобы кнопка под дайджестом срабатывала и после рестарта,
-    когда FSM пуст) и требуется всеми последующими шагами. Это защищает от
-    срабатывания «устаревших» кнопок на старом сообщении после того, как любая
-    команда сбросила FSM, и гарантирует, что `tm_origin` и выбор ещё на месте.
+    Состояние выставляется при входе (`md_mark`, который остаётся без фильтра
+    состояния — чтобы кнопка под дайджестом срабатывала и после рестарта, когда FSM
+    пуст) и требуется всеми последующими шагами. Это защищает от срабатывания
+    «устаревших» кнопок на старом сообщении после того, как любая команда сбросила
+    FSM, и гарантирует, что выбор (`md_selected`) ещё на месте.
     """
 
     active = State()
@@ -134,6 +124,19 @@ def _today_block(ordered: list[Task], done_ids: set[int]) -> str:
     if done:
         blocks.append("\n".join(done))
     return "\n\n".join(blocks)
+
+
+def _digest_tasks_text(header_key: str, ordered: list[Task], done_ids: set[int]) -> str:
+    """Текст дайджеста-списка сегодняшних задач: жирный заголовок + блок задач
+    (буллеты «• », выполненные зачёркнуты) + жирная подсказка нажать кнопку. Если
+    задач нет — только заголовок. Общий для финального вида утреннего дайджеста и для
+    вечернего дайджеста — различаются только заголовком (`header_key`).
+    """
+    header = f"*{escape_md(TEXTS[header_key])}*"
+    if not ordered:
+        return header
+    prompt = f"*{escape_md(TEXTS['digest_today_mark_prompt'])}*"
+    return f"{header}\n\n{_today_block(ordered, done_ids)}\n\n{prompt}"
 
 
 async def _tasks_for_date_not_done(
@@ -188,53 +191,24 @@ async def _today_marking_tasks(
     return not_done + done, {task.id for task in done}
 
 
-async def _evening_digest_text(repo: Repository, user: User, today) -> str:
-    """Текст вечернего итога: выполненные против оставшихся за сегодня.
-
-    Удалённые (is_active=False) задачи в итоге не показываются — даже если за
-    сегодня по ним остался лог.
-    """
-    logs = await repo.get_logs_for_date(user.telegram_id, today)
-    if not logs:
-        return escape_md(TEXTS["digest_evening_no_tasks"])
-
-    done, remaining = [], []
-    for log in logs:
-        task = await repo.get_task(log.task_id)
-        if task is None or not task.is_active:
-            continue
-        (done if log.status == TaskStatus.done else remaining).append(task.name)
-
-    if not remaining:
-        header = escape_md(TEXTS["digest_evening_header"])
-        return f"{header}\n\n{escape_md(TEXTS['digest_evening_all_done'])}"
-
-    parts = [escape_md(TEXTS["digest_evening_header"]), ""]
-    if done:
-        parts.append(escape_md(TEXTS["digest_evening_done"]))
-        parts.extend(f"• {escape_md(name)}" for name in done)
-        parts.append("")
-    parts.append(escape_md(TEXTS["digest_evening_pending"]))
-    parts.extend(f"• {escape_md(name)}" for name in remaining)
-    return "\n".join(parts)
-
-
 async def build_evening_digest(
     repo: Repository,
     user: User,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
-    """Вечерний дайджест для планировщика: текст итогов + inline-кнопка отметки.
+    """Вечерний дайджест для планировщика: список сегодняшних задач + inline-кнопка.
 
-    Кнопка отметки сегодняшних задач показывается, если на сегодня есть задачи
-    (любого статуса); её текст — «Отменить выполнение», если все они выполнены.
-    Возвращает (текст, inline-клавиатуру).
+    Структура текста — как у финального вида утреннего дайджеста (жирный заголовок
+    «Итоги дня» + блок задач на сегодня + подсказка), без блока просроченных;
+    различается только заголовок. Кнопка «Отметить выполненные» открывает /today-вид
+    отметки с автосохранением (флоу `dm_*`, origin "e" — «‹ Назад» вернёт сюда). Если
+    на сегодня задач нет — заглушка без кнопки. Возвращает (текст, inline-клавиатуру).
     """
     today = datetime.now(_user_tz(user)).date()
-    text = await _evening_digest_text(repo, user, today)
-    ordered, done_ids = await _today_marking_tasks(repo, user, today)
-    has_tasks = bool(ordered)
-    all_done = has_tasks and len(done_ids) == len(ordered)
-    keyboard = evening_digest_kb(has_tasks, all_done)
+    ordered, done_ids = await _today_ordered(repo, user, today)  # создаёт логи + читает
+    if not ordered:
+        return escape_md(TEXTS["digest_evening_no_tasks"]), None
+    text = _digest_tasks_text("digest_evening_header", ordered, done_ids)
+    keyboard = evening_digest_kb(_DM_EVENING)
     return text, keyboard
 
 
@@ -285,25 +259,6 @@ async def build_morning_digest(
     return text, keyboard
 
 
-async def _digest_text_for(repo: Repository, user: User, origin: str) -> str:
-    """Текст дайджеста по источнику флоу отметки (утро/вечер)."""
-    if origin == _ORIGIN_MORNING:
-        return await _morning_digest_text(repo, user)
-    today = datetime.now(_user_tz(user)).date()
-    return await _evening_digest_text(repo, user, today)
-
-
-async def _build_digest(
-    repo: Repository,
-    user: User,
-    origin: str,
-) -> tuple[str, InlineKeyboardMarkup | None]:
-    """Собрать дайджест (куда вернуться) по источнику флоу отметки."""
-    if origin == _ORIGIN_MORNING:
-        return await build_morning_digest(repo, user)
-    return await build_evening_digest(repo, user)
-
-
 # --------------------------------------------------------------------------- #
 #  Интерактивный утренний дайджест: отметка вчерашних (просроченных) задач
 #
@@ -342,13 +297,9 @@ def _overdue_confirm_text(overdue: list[Task], selected: set[int]) -> str:
 
 def _morning_final_text(ordered: list[Task], done_ids: set[int]) -> str:
     """Финальный вид утреннего дайджеста после подтверждения просроченных: без блока
-    просроченных. Жирный заголовок + блок сегодняшних задач + жирная подсказка. Если
-    задач на сегодня нет — только заголовок."""
-    header = f"*{escape_md(TEXTS['digest_morning_final_header'])}*"
-    if not ordered:
-        return header
-    prompt = f"*{escape_md(TEXTS['digest_morning_final_prompt'])}*"
-    return f"{header}\n\n{_today_block(ordered, done_ids)}\n\n{prompt}"
+    просроченных. Жирный заголовок + блок сегодняшних задач + жирная подсказка
+    (та же структура, что и у вечернего дайджеста — см. `_digest_tasks_text`)."""
+    return _digest_tasks_text("digest_morning_final_header", ordered, done_ids)
 
 
 async def _morning_final_view(
@@ -548,247 +499,6 @@ async def md_expired_ok(callback: CallbackQuery, state: FSMContext, repo: Reposi
 
 
 # --------------------------------------------------------------------------- #
-#  Интерактивная отметка сегодняшних задач (общий флоу: утро, вечер и /tasks)
-#
-#  Вход — inline-кнопка (callback `tm_mark:{origin}`, без фильтра состояния;
-#  origin — "morning", "evening" или "tasks"). Кнопка редактирует сообщение в
-#  экран выбора и выставляет `MarkingStates.active`; дальнейшие шаги (`tm_*`)
-#  требуют этого состояния. Экран выбора показывает ВСЕ сегодняшние задачи:
-#  невыполненные без галочки, выполненные — с галочкой; галочки можно как
-#  ставить, так и снимать. «Готово» → подтверждение → «Подтвердить» фиксирует
-#  новый статус всех задач (выбранные → done, остальные → pending) и возвращает
-#  к исходному экрану. Источник флоу хранится в FSM (`tm_origin`) — это
-#  соответствующий (утренний или вечерний) дайджест.
-# --------------------------------------------------------------------------- #
-
-def _resolve_origin(value: str | None) -> str:
-    """Нормализовать источник флоу: morning / (по умолчанию) evening."""
-    return _ORIGIN_MORNING if value == _ORIGIN_MORNING else _ORIGIN_EVENING
-
-
-def _today_confirm_text(tasks: list[Task], selected: set[int]) -> str:
-    """Экран подтверждения отметки сегодняшних задач (без предупреждения о сгорании).
-
-    Выбранные станут выполненными, остальные — невыполненными.
-    """
-    marked = [task for task in tasks if task.id in selected]
-    unmarked = [task for task in tasks if task.id not in selected]
-    parts = [escape_md(TEXTS["evening_confirm_header"]), ""]
-    if marked:
-        parts.append(escape_md(TEXTS["evening_confirm_marked"]))
-        parts.extend(f"• {escape_md(task.name)}" for task in marked)
-        parts.append("")
-    if unmarked:
-        parts.append(escape_md(TEXTS["evening_confirm_unmarked"]))
-        parts.extend(f"• {escape_md(task.name)}" for task in unmarked)
-        parts.append("")
-    if not marked:
-        parts.append(escape_md(TEXTS["evening_confirm_none_marked"]))
-    return "\n".join(parts).rstrip()
-
-
-async def _apply_today_marks(
-    repo: Repository,
-    user: User,
-    tasks: list[Task],
-    selected: set[int],
-    today,
-) -> int:
-    """Зафиксировать статусы сегодняшних задач: выбранные → done, остальные → pending.
-
-    Статус меняется только при фактическом отличии (чтобы не плодить лишние
-    отметки времени). Возвращает число задач, ставших выполненными.
-    """
-    done_count = 0
-    for task in tasks:
-        log = await repo.get_or_create_log(task.id, user.telegram_id, today)
-        new_status = TaskStatus.done if task.id in selected else TaskStatus.pending
-        if log.status != new_status:
-            await repo.set_log_status(log, new_status)
-        if new_status == TaskStatus.done:
-            done_count += 1
-    return done_count
-
-
-async def _show_today_select(
-    callback: CallbackQuery,
-    repo: Repository,
-    user: User,
-    origin: str,
-    ordered: list[Task],
-    selected: set[int],
-    page: int,
-) -> None:
-    """Отрисовать экран выбора сегодняшних задач (текст дайджеста + подсказка)."""
-    digest_text = await _digest_text_for(repo, user, origin)
-    text = f"{digest_text}\n\n{escape_md(TEXTS['evening_select_prompt'])}"
-    await callback.message.edit_text(
-        text,
-        reply_markup=task_select_kb(
-            [(t.id, t.name) for t in ordered], selected, page, "tm"
-        ),
-    )
-
-
-@router.callback_query(F.data.startswith("tm_mark"))
-async def tm_mark(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """Inline-кнопка отметки сегодняшних задач (без фильтра состояния) — открыть экран выбора."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    # callback-data: "tm_mark:{origin}".
-    parts = callback.data.split(":", 1)
-    origin = _resolve_origin(parts[1] if len(parts) > 1 else None)
-    user = await repo.get_user(callback.from_user.id)
-    today = datetime.now(_user_tz(user)).date()
-    # Текст дайджеста для утра создаёт логи сегодняшних задач — считаем его первым.
-    digest_text = await _digest_text_for(repo, user, origin)
-    ordered, done_ids = await _today_marking_tasks(repo, user, today)
-    if not ordered:
-        # Задач на сегодня нет — показываем alert и возвращаемся к дайджесту.
-        await callback.answer(TEXTS["evening_nothing"], show_alert=True)
-        text, keyboard = await _build_digest(repo, user, origin)
-        await callback.message.edit_text(text, reply_markup=keyboard)
-        return
-    # Стартовые галочки = уже выполненные задачи (их можно снять).
-    await state.set_state(MarkingStates.active)
-    await state.update_data(tm_selected=list(done_ids), tm_page=0, tm_origin=origin)
-    text = f"{digest_text}\n\n{escape_md(TEXTS['evening_select_prompt'])}"
-    await callback.message.edit_text(
-        text,
-        reply_markup=task_select_kb(
-            [(t.id, t.name) for t in ordered], done_ids, 0, "tm"
-        ),
-    )
-    await callback.answer()
-
-
-@router.callback_query(MarkingStates.active, F.data.startswith("tm_toggle:"))
-async def tm_toggle(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """Переключить галочку на сегодняшней задаче (меняем только клавиатуру)."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    task_id = int(callback.data.split(":", 1)[1])
-    user = await repo.get_user(callback.from_user.id)
-    today = datetime.now(_user_tz(user)).date()
-    ordered, _ = await _today_marking_tasks(repo, user, today)
-    valid_ids = {task.id for task in ordered}
-    data = await state.get_data()
-    selected = set(data.get("tm_selected", [])) & valid_ids
-    page = data.get("tm_page", 0)
-    if task_id in valid_ids:
-        selected.symmetric_difference_update({task_id})
-    await state.update_data(tm_selected=list(selected))
-    await callback.message.edit_reply_markup(
-        reply_markup=task_select_kb(
-            [(t.id, t.name) for t in ordered], selected, page, "tm"
-        )
-    )
-    await callback.answer()
-
-
-@router.callback_query(MarkingStates.active, F.data.startswith("tm_page:"))
-async def tm_page(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """Пагинация списка сегодняшних задач (alert на краях)."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    page = int(callback.data.split(":", 1)[1])
-    user = await repo.get_user(callback.from_user.id)
-    today = datetime.now(_user_tz(user)).date()
-    ordered, _ = await _today_marking_tasks(repo, user, today)
-    total_pages = max(1, (len(ordered) + OVERDUE_PAGE_SIZE - 1) // OVERDUE_PAGE_SIZE)
-    if page < 0:
-        await callback.answer(TEXTS["pagination_first"], show_alert=True)
-        return
-    if page >= total_pages:
-        await callback.answer(TEXTS["pagination_last"], show_alert=True)
-        return
-    data = await state.get_data()
-    selected = set(data.get("tm_selected", []))
-    await state.update_data(tm_page=page)
-    await callback.message.edit_reply_markup(
-        reply_markup=task_select_kb(
-            [(t.id, t.name) for t in ordered], selected, page, "tm"
-        )
-    )
-    await callback.answer()
-
-
-@router.callback_query(MarkingStates.active, F.data == "tm_done")
-async def tm_done(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """«Готово» — показать экран подтверждения нового статуса всех задач."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    user = await repo.get_user(callback.from_user.id)
-    today = datetime.now(_user_tz(user)).date()
-    ordered, _ = await _today_marking_tasks(repo, user, today)
-    data = await state.get_data()
-    selected = set(data.get("tm_selected", [])) & {task.id for task in ordered}
-    await callback.message.edit_text(
-        _today_confirm_text(ordered, selected), reply_markup=select_confirm_kb("tm")
-    )
-    await callback.answer()
-
-
-@router.callback_query(MarkingStates.active, F.data == "tm_back_digest")
-async def tm_back_digest(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """«‹ Назад» (с выбора) — вернуть исходный экран (того же источника) с кнопками."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    user = await repo.get_user(callback.from_user.id)
-    data = await state.get_data()
-    origin = _resolve_origin(data.get("tm_origin"))
-    text, keyboard = await _build_digest(repo, user, origin)
-    await callback.message.edit_text(text, reply_markup=keyboard)
-    await state.clear()
-    await callback.answer()
-
-
-@router.callback_query(MarkingStates.active, F.data == "tm_back_select")
-async def tm_back_select(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """«‹ Назад» (с подтверждения) — вернуть экран выбора (галочки сохраняются)."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    user = await repo.get_user(callback.from_user.id)
-    today = datetime.now(_user_tz(user)).date()
-    ordered, _ = await _today_marking_tasks(repo, user, today)
-    data = await state.get_data()
-    selected = set(data.get("tm_selected", [])) & {task.id for task in ordered}
-    page = data.get("tm_page", 0)
-    origin = _resolve_origin(data.get("tm_origin"))
-    await _show_today_select(callback, repo, user, origin, ordered, selected, page)
-    await callback.answer()
-
-
-@router.callback_query(MarkingStates.active, F.data == "tm_confirm")
-async def tm_confirm(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """«Подтвердить» — зафиксировать статусы и вернуть исходный экран (кнопка остаётся)."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    user = await repo.get_user(callback.from_user.id)
-    today = datetime.now(_user_tz(user)).date()
-    ordered, _ = await _today_marking_tasks(repo, user, today)
-    data = await state.get_data()
-    selected = set(data.get("tm_selected", [])) & {task.id for task in ordered}
-    origin = _resolve_origin(data.get("tm_origin"))
-    done_count = await _apply_today_marks(repo, user, ordered, selected, today)
-    logger.info(
-        "User {} confirmed today marking via {} ({}/{} done)",
-        user.telegram_id, origin, done_count, len(ordered),
-    )
-    text, keyboard = await _build_digest(repo, user, origin)
-    await callback.message.edit_text(text, reply_markup=keyboard)
-    await state.clear()
-    await callback.answer()
-
-
-# --------------------------------------------------------------------------- #
 #  Команда /today: список задач на сегодня сразу с отметкой галочками
 #
 #  Сообщение: жирный заголовок «Задачи на сегодня», блок невыполненных (обычный
@@ -915,23 +625,22 @@ async def today_page(callback: CallbackQuery, repo: Repository) -> None:
 
 
 # --------------------------------------------------------------------------- #
-#  Утренний дайджест: отметка сегодняшних задач (auto-save, как /today)
+#  Дайджесты (утренний и вечерний): отметка сегодняшних задач (auto-save, как /today)
 #
-#  Верхняя кнопка «Отметить выполненные» (`dm_mark:{origin}`) редактирует дайджест
-#  в тот же вид, что и /today: галочки с автосохранением (нажатие сразу пишет статус
-#  в БД), плюс последним рядом красная кнопка «‹ Назад» (`dm_back:{origin}`). Все
-#  шаги несут origin — версию дайджеста, из которой вошли ("d" — обычный дайджест с
-#  возможным блоком/кнопкой просроченных; "f" — финальный вид без просроченных).
-#  «‹ Назад» возвращает РОВНО к этой версии: после прохождения флоу просроченных
-#  (origin становится "f") их кнопка больше не появляется. Без FSM (как /today):
-#  страница и origin в callback-data, источник истины статусов — БД, поэтому кнопки
-#  работают и после рестарта. Вечерний дайджест использует отдельный флоу `tm_*`
-#  (с «Готово» и подтверждением) — он не затронут.
+#  Кнопка «Отметить выполненные» (`dm_mark:{origin}`) редактирует дайджест в тот же
+#  вид, что и /today: галочки с автосохранением (нажатие сразу пишет статус в БД),
+#  плюс последним рядом красная кнопка «‹ Назад» (`dm_back:{origin}`). Все шаги несут
+#  origin — версию дайджеста, из которой вошли: "d" — обычный утренний (с возможным
+#  блоком/кнопкой просроченных), "f" — финальный вид утреннего без просроченных,
+#  "e" — вечерний. «‹ Назад» возвращает РОВНО к этой версии (после прохождения флоу
+#  просроченных origin становится "f", поэтому их кнопка больше не появляется). Без
+#  FSM (как /today): страница и origin в callback-data, источник истины статусов — БД,
+#  поэтому кнопки работают и после рестарта. Один флоу обслуживает оба дайджеста.
 # --------------------------------------------------------------------------- #
 
 def _dm_origin(value: str | None) -> str:
-    """Нормализовать origin dm-флоу: 'f' (финальный вид) или 'd' (обычный дайджест)."""
-    return _DM_FINAL if value == _DM_FINAL else _DM_DIGEST
+    """Нормализовать origin dm-флоу: 'f' (финальный вид) / 'e' (вечерний) / 'd' (обычный)."""
+    return value if value in (_DM_FINAL, _DM_EVENING) else _DM_DIGEST
 
 
 async def _dm_return_view(
@@ -939,18 +648,20 @@ async def _dm_return_view(
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     """(Текст, клавиатура) той версии дайджеста, из которой вошли в отметку задач.
 
-    origin='f' — финальный вид без просроченных, origin='d' — обычный дайджест.
-    Используется кнопкой «‹ Назад» и фолбэком при отсутствии задач, чтобы сообщение
-    восстанавливалось ровно в исходную версию.
+    origin='f' — финальный вид утреннего без просроченных, 'e' — вечерний дайджест,
+    'd' — обычный утренний. Используется кнопкой «‹ Назад» и фолбэком при отсутствии
+    задач, чтобы сообщение восстанавливалось ровно в исходную версию.
     """
     if origin == _DM_FINAL:
         return await _morning_final_view(repo, user)
+    if origin == _DM_EVENING:
+        return await build_evening_digest(repo, user)
     return await build_morning_digest(repo, user)
 
 
 @router.callback_query(F.data.startswith("dm_mark:"))
 async def dm_mark(callback: CallbackQuery, repo: Repository) -> None:
-    """Верхняя кнопка утреннего дайджеста — открыть /today-вид отметки сегодняшних задач."""
+    """Кнопка дайджеста «Отметить выполненные» — открыть /today-вид отметки сегодняшних задач."""
     if callback.message is None:
         await callback.answer()
         return
@@ -967,7 +678,7 @@ async def dm_mark(callback: CallbackQuery, repo: Repository) -> None:
         return
     await callback.message.edit_text(
         _today_view_text(ordered, done_ids),
-        reply_markup=morning_today_mark_kb(
+        reply_markup=digest_today_mark_kb(
             [(t.id, t.name) for t in ordered], done_ids, 0, origin
         ),
     )
@@ -976,7 +687,7 @@ async def dm_mark(callback: CallbackQuery, repo: Repository) -> None:
 
 @router.callback_query(F.data.startswith("dm_toggle:"))
 async def dm_toggle(callback: CallbackQuery, repo: Repository) -> None:
-    """Галочка в утреннем дайджесте: сразу переключить статус задачи в БД и перестроить вид."""
+    """Галочка в дайджесте: сразу переключить статус задачи в БД и перестроить вид."""
     if callback.message is None:
         await callback.answer()
         return
@@ -997,7 +708,7 @@ async def dm_toggle(callback: CallbackQuery, repo: Repository) -> None:
     ordered, done_ids = await _today_marking_tasks(repo, user, today)
     await callback.message.edit_text(
         _today_view_text(ordered, done_ids),
-        reply_markup=morning_today_mark_kb(
+        reply_markup=digest_today_mark_kb(
             [(t.id, t.name) for t in ordered], done_ids, page, origin
         ),
     )
@@ -1006,7 +717,7 @@ async def dm_toggle(callback: CallbackQuery, repo: Repository) -> None:
 
 @router.callback_query(F.data.startswith("dm_page:"))
 async def dm_page(callback: CallbackQuery, repo: Repository) -> None:
-    """Пагинация вида отметки сегодняшних задач в утреннем дайджесте (alert на краях)."""
+    """Пагинация вида отметки сегодняшних задач в дайджесте (alert на краях)."""
     if callback.message is None:
         await callback.answer()
         return
@@ -1029,7 +740,7 @@ async def dm_page(callback: CallbackQuery, repo: Repository) -> None:
         await callback.answer(TEXTS["pagination_last"], show_alert=True)
         return
     await callback.message.edit_reply_markup(
-        reply_markup=morning_today_mark_kb(
+        reply_markup=digest_today_mark_kb(
             [(t.id, t.name) for t in ordered], done_ids, page, origin
         )
     )
