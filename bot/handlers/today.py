@@ -1,9 +1,10 @@
 """Интерактивные дайджесты и напоминания.
 
 Здесь живёт вся логика утреннего и вечернего дайджестов (сборка текста и
-интерактивная отметка задач), обработчик кнопки «Выполнена» на напоминании, а
-также команда `/today` — список задач на сегодня сразу с галочками (отметка
-применяется по нажатию). Отдельной команды `/done` нет.
+интерактивная отметка задач), напоминание о задаче с кнопкой-галочкой отметки
+(стандартная механика, как у /today), а также команда `/today` — список задач на
+сегодня сразу с галочками (отметка применяется по нажатию). Отдельной команды
+`/done` нет.
 
 Отметка сегодняшних задач у обоих дайджестов работает одинаково — флоу `dm_*`:
 синяя кнопка «Отметить выполненные» редактирует сообщение в тот же вид, что и
@@ -50,6 +51,7 @@ from bot.keyboards.builders import (
     overdue_confirm_kb,
     overdue_expired_kb,
     overdue_select_kb,
+    reminder_kb,
     today_mark_kb,
 )
 from bot.utils.validators import escape_md
@@ -245,17 +247,22 @@ async def build_morning_digest(
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     """Утренний дайджест для планировщика: текст + inline-кнопки отметки.
 
-    Сначала строится текст (он же создаёт логи сегодняшних задач), затем
-    клавиатура: синяя «Отметить выполненные» (если задачи на сегодня есть) и красная
-    «Отметить вчерашние задачи» (если просроченные есть). Возвращает (текст,
-    inline-клавиатуру).
+    Если есть просроченные задачи — обычный вид: вступление + блок задач на сегодня
+    + блок просроченных, синяя «Отметить выполненные» (если задачи на сегодня есть) и
+    красная «Отметить вчерашние задачи» (origin "d" — «‹ Назад» из отметки
+    сегодняшних вернёт сюда). Если просроченных нет — сразу финальный вид (тот же
+    формат, что показывается после прохождения флоу отметки просроченных): заголовок
+    + задачи на сегодня + синяя кнопка, без блока и кнопки просроченных
+    (`_morning_final_view`). Возвращает (текст, inline-клавиатуру).
     """
     today = datetime.now(_user_tz(user)).date()
+    overdue = await _overdue_tasks(repo, user, today)
+    if not overdue:
+        # Просроченных нет — показываем сразу финальный вид (origin "f").
+        return await _morning_final_view(repo, user)
     text = await _morning_digest_text(repo, user)
     ordered, _ = await _today_marking_tasks(repo, user, today)
-    overdue = await _overdue_tasks(repo, user, today)
-    # origin="d": это обычный дайджест — «‹ Назад» из отметки сегодняшних вернёт сюда.
-    keyboard = morning_digest_kb(bool(ordered), bool(overdue), _DM_DIGEST)
+    keyboard = morning_digest_kb(bool(ordered), True, _DM_DIGEST)
     return text, keyboard
 
 
@@ -306,10 +313,16 @@ async def _morning_final_view(
     repo: Repository, user: User
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     """Текст и клавиатура финального вида: без просроченных, остаётся только кнопка
-    отметки сегодняшних задач (если они есть)."""
+    отметки сегодняшних задач (если они есть).
+
+    Если задач на сегодня нет — короткая заглушка без клавиатуры (как и у обычного
+    утреннего дайджеста в пустой день).
+    """
     today = datetime.now(_user_tz(user)).date()
     await _today_tasks(repo, user, today)  # гарантируем pending-логи сегодняшних задач
     ordered, done_ids = await _today_marking_tasks(repo, user, today)
+    if not ordered:
+        return escape_md(TEXTS["digest_morning_no_tasks"]), None
     text = _morning_final_text(ordered, done_ids)
     # origin="f": финальный вид без просроченных — «‹ Назад» из отметки вернёт сюда,
     # поэтому кнопка просроченных после прохождения флоу больше не появится.
@@ -762,42 +775,70 @@ async def dm_back(callback: CallbackQuery, repo: Repository) -> None:
 
 
 # --------------------------------------------------------------------------- #
-#  Кнопка «Выполнена» на напоминании о задаче
+#  Напоминание о задаче: текст + кнопка-галочка отметки (стандартная механика)
+#
+#  Сообщение: жирный заголовок «Напоминание» + строка «Пора выполнить задачу …».
+#  Кнопка под ним — стандартная галочка отметки (как /today): синяя ⬜ с названием
+#  задачи, по нажатию — зелёная ☑️; повторное нажатие возвращает обратно. Кнопка не
+#  пропадает, текст сообщения от её состояния не зависит. Если задача уже отмечена
+#  выполненной за дату напоминания — кнопка приходит сразу зелёной с галочкой. Без
+#  FSM: статус — из БД, дата — в callback-data, поэтому кнопка работает и после
+#  рестарта бота.
 # --------------------------------------------------------------------------- #
 
+def _reminder_text(name: str) -> str:
+    """Текст напоминания: жирный заголовок «Напоминание» + строка с названием задачи."""
+    title = f"*{escape_md(TEXTS['reminder_title'])}*"
+    body = escape_md(TEXTS["reminder_body"].format(name=name))
+    return f"{title}\n\n{body}"
+
+
+async def build_reminder(
+    repo: Repository, task: Task, target_date: date
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Собрать напоминание о задаче для планировщика: текст + кнопка-галочка.
+
+    Кнопка приходит сразу зелёной с галочкой, если задача уже отмечена выполненной
+    за `target_date` (иначе синяя с пустым квадратом). Текст от состояния кнопки не
+    зависит. Возвращает (текст, inline-клавиатуру).
+    """
+    log = await repo.get_log(task.id, target_date)
+    is_done = log is not None and log.status == TaskStatus.done
+    return _reminder_text(task.name), reminder_kb(task.id, target_date, task.name, is_done)
+
+
 @router.callback_query(F.data.startswith("rem_done:"))
-async def reminder_done(callback: CallbackQuery, repo: Repository) -> None:
-    """Отметить задачу выполненной из напоминания (активно до 12:00 следующего дня)."""
+async def reminder_toggle(callback: CallbackQuery, repo: Repository) -> None:
+    """Нажатие на кнопку-галочку напоминания: переключить статус задачи в БД (как /today).
+
+    Стандартная механика отметки: нажатие переключает статус задачи за дату
+    напоминания (done ↔ pending) и перерисовывает только кнопку (синяя ⬜ ↔ зелёная
+    ☑️). Текст сообщения не меняется, кнопка не пропадает. Если задача удалена —
+    отметить нельзя, сообщаем об этом alert'ом, кнопку оставляем как есть.
+    """
     if callback.message is None:
         await callback.answer()
         return
+    # callback-data: "rem_done:{task_id}:{дата}".
     parts = callback.data.split(":")
     task_id = int(parts[1])
     target_date = date.fromisoformat(parts[2])
-    user = await repo.get_user(callback.from_user.id)
-    tz = _user_tz(user)
-    now = datetime.now(tz)
-    deadline = tz.localize(datetime.combine(target_date + timedelta(days=1), time(12, 0)))
-    if now >= deadline:
-        await callback.message.edit_text(escape_md(TEXTS["reminder_expired"]))
-        await callback.answer()
-        return
-
     task = await repo.get_active_task(task_id, callback.from_user.id)
     if task is None:
-        await callback.message.edit_text(escape_md(TEXTS["reminder_gone"]))
-        await callback.answer()
+        await callback.answer(TEXTS["reminder_gone"], show_alert=True)
         return
-
+    user = await repo.get_user(callback.from_user.id)
     log = await repo.get_or_create_log(task_id, user.telegram_id, target_date)
-    if log.status == TaskStatus.done:
-        await callback.message.edit_text(
-            escape_md(TEXTS["reminder_already_done"].format(name=task.name))
-        )
-    else:
-        await repo.set_log_status(log, TaskStatus.done)
-        await callback.message.edit_text(
-            escape_md(TEXTS["reminder_marked_done"].format(name=task.name))
-        )
-        logger.info("User {} marked task {} done via reminder", user.telegram_id, task_id)
+    new_status = (
+        TaskStatus.pending if log.status == TaskStatus.done else TaskStatus.done
+    )
+    await repo.set_log_status(log, new_status)
+    is_done = new_status == TaskStatus.done
+    logger.info(
+        "User {} toggled task {} (now {}) via reminder",
+        user.telegram_id, task_id, new_status.name,
+    )
+    await callback.message.edit_reply_markup(
+        reply_markup=reminder_kb(task_id, target_date, task.name, is_done)
+    )
     await callback.answer()

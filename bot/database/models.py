@@ -30,9 +30,8 @@ from bot.database.base import Base
 class FrequencyType(str, enum.Enum):
     """Тип расписания задачи."""
 
-    daily = "daily"                # каждый день
+    daily = "daily"                  # каждый день
     specific_days = "specific_days"  # конкретные дни недели
-    one_time = "one_time"          # одноразовая (на конкретную дату)
 
 
 class TaskStatus(str, enum.Enum):
@@ -88,8 +87,6 @@ class Task(Base):
     )
     # Для specific_days: строка вида "mon,wed,fri".
     days: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # Для one_time: дата выполнения.
-    one_time_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     # Опциональное время отдельного напоминания.
     reminder_time: Mapped[time | None] = mapped_column(Time, nullable=True)
 

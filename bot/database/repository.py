@@ -156,7 +156,6 @@ class Repository:
         name: str,
         frequency_type: FrequencyType,
         days: str | None = None,
-        one_time_date: date | None = None,
         reminder_time: time | None = None,
     ) -> Task:
         """Создать активную задачу."""
@@ -165,7 +164,6 @@ class Repository:
             name=name,
             frequency_type=frequency_type,
             days=days,
-            one_time_date=one_time_date,
             reminder_time=reminder_time,
             is_active=True,
         )
@@ -211,12 +209,11 @@ class Repository:
     ) -> None:
         """Изменить частоту задачи (для /edit).
 
-        Поддерживаются только `daily` и `specific_days`; `one_time_date`
-        сбрасывается, так как редактирование частоты делает задачу повторяющейся.
+        Поддерживаются `daily` и `specific_days` (для повторяющихся дней —
+        строка кодов в `days`, иначе None).
         """
         task.frequency_type = frequency_type
         task.days = days
-        task.one_time_date = None
         await self.session.flush()
 
     async def update_task_reminder(self, task: Task, reminder_time: time | None) -> None:
@@ -253,8 +250,7 @@ class Repository:
 
         Фильтрация по типу частоты выполняется в Python:
         - daily         — всегда;
-        - specific_days — если код дня недели присутствует в task.days;
-        - one_time      — если one_time_date совпадает с целевой датой.
+        - specific_days — если код дня недели присутствует в task.days.
         """
         tasks = await self.get_active_tasks(user_id)
         weekday_code = _WEEKDAY_CODES[target_date.weekday()]
@@ -266,31 +262,12 @@ class Repository:
                 selected = (task.days or "").split(",")
                 if weekday_code in selected:
                     due.append(task)
-            elif task.frequency_type == FrequencyType.one_time:
-                if task.one_time_date == target_date:
-                    due.append(task)
         return due
 
     async def soft_delete_task(self, task: Task) -> None:
         """Мягкое удаление: пометить задачу неактивной."""
         task.is_active = False
         await self.session.flush()
-
-    async def get_forgettable_one_time_tasks(self, cutoff_date: date) -> list[Task]:
-        """Активные одноразовые задачи с датой раньше cutoff_date.
-
-        Через сутки после истечения срока одноразовая задача «забывается»
-        (деактивируется): передаётся cutoff = today - 1 день, под условие
-        попадают задачи с one_time_date < cutoff (т.е. старше, чем вчера).
-        """
-        result = await self.session.execute(
-            select(Task).where(
-                Task.is_active.is_(True),
-                Task.frequency_type == FrequencyType.one_time,
-                Task.one_time_date < cutoff_date,
-            )
-        )
-        return list(result.scalars().all())
 
     # ------------------------------------------------------------------ #
     #  TaskLogs

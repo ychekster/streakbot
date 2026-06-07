@@ -80,9 +80,7 @@ def _freq_str(task: Task) -> str:
     """Человекочитаемая частота задачи для карточки."""
     if task.frequency_type == FrequencyType.daily:
         return "Каждый день"
-    if task.frequency_type == FrequencyType.specific_days:
-        return format_days_short(task.days or "")
-    return "Одноразовая · " + task.one_time_date.strftime("%d.%m.%Y")
+    return format_days_short(task.days or "")
 
 
 def _card_text(task: Task) -> str:

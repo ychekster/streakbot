@@ -1,6 +1,6 @@
 """FSM добавления задачи (/add).
 
-Три ветки частоты: каждый день (A), конкретные дни (B), одноразовая (C).
+Две ветки частоты: каждый день (A) и конкретные дни недели (B).
 Текстовый ввод исключает команды (`~Command(*COMMANDS)`), поэтому любая команда
 во время добавления сбрасывает состояние и выполняется — как требует основной
 сценарий. Нажатия inline-кнопок редактируют текущее сообщение, текстовый ввод
@@ -9,29 +9,22 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
-
-import pytz
 from aiogram import F, Router
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 from loguru import logger
 
-from bot.constants import COMMANDS, MONTHS, TEXTS, WEEKDAYS
+from bot.constants import COMMANDS, TEXTS, WEEKDAYS
 from bot.database.models import FrequencyType
 from bot.database.repository import Repository
 from bot.keyboards.builders import (
     REMOVE_KB,
-    current_years,
-    day_kb,
     days_kb,
     frequency_kb,
     has_reminder_kb,
-    month_kb,
     reminder_time_back_kb,
-    year_kb,
 )
 from bot.services.scheduler import SchedulerService
 from bot.utils.validators import escape_md, parse_time
@@ -51,9 +44,6 @@ class AddTaskStates(StatesGroup):
     name = State()
     frequency = State()
     days_select = State()
-    year_select = State()
-    month_select = State()
-    day_select = State()
     has_reminder = State()
     reminder_time = State()
 
@@ -80,38 +70,16 @@ def _days_ru(codes: list[str]) -> str:
     return ", ".join(_DAY_SHORT[code] for code in _ordered_codes(codes))
 
 
-def _build_date(data: dict) -> date:
-    """Построить дату одноразовой задачи из сохранённых year/month/day."""
-    return date(data["year"], data["month"], data["day"])
-
-
 def _freq_summary(data: dict, reminder_str: str | None = None) -> str:
     """Собрать строку-сводку частоты для заголовков и подтверждения."""
     freq = data["frequency"]
     if freq == "daily":
         base = "Каждый день"
-    elif freq == "specific_days":
+    else:  # specific_days
         base = _days_ru(data.get("days", []))
-    else:
-        base = "Одноразовая · " + _build_date(data).strftime("%d.%m.%Y")
     if reminder_str:
         base += f" · Напоминание в {reminder_str}"
     return base
-
-
-async def _user_today(repo: Repository, user_id: int) -> date:
-    """Текущая дата в часовом поясе пользователя."""
-    user = await repo.get_user(user_id)
-    try:
-        tz = pytz.timezone(user.timezone) if user and user.timezone else pytz.utc
-    except Exception:  # noqa: BLE001
-        tz = pytz.utc
-    return datetime.now(tz).date()
-
-
-def _is_one_time_today(data: dict, today: date) -> bool:
-    """Является ли выбранная дата одноразовой задачи сегодняшней."""
-    return data["frequency"] == "one_time" and _build_date(data) == today
 
 
 # --------------------------------------------------------------------------- #
@@ -157,8 +125,8 @@ async def add_name(message: Message, state: FSMContext, repo: Repository) -> Non
 # --------------------------------------------------------------------------- #
 
 @router.callback_query(AddTaskStates.frequency, F.data.startswith("freq:"))
-async def choose_frequency(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """Развилка по выбранной частоте."""
+async def choose_frequency(callback: CallbackQuery, state: FSMContext) -> None:
+    """Развилка по выбранной частоте: каждый день или конкретные дни недели."""
     if callback.message is None:
         await callback.answer()
         return
@@ -179,14 +147,6 @@ async def choose_frequency(callback: CallbackQuery, state: FSMContext, repo: Rep
         await state.set_state(AddTaskStates.days_select)
         text = f"{escape_md(name)}\n\n{escape_md(TEXTS['add_task_days'])}"
         await callback.message.edit_text(text, reply_markup=days_kb(set()))
-    elif choice == "onetime":
-        await state.update_data(frequency="one_time")
-        await state.set_state(AddTaskStates.year_select)
-        text = (
-            f"{escape_md(name)}\n{escape_md('Одноразовая')}\n\n"
-            f"{escape_md(TEXTS['add_task_year'])}"
-        )
-        await callback.message.edit_text(text, reply_markup=year_kb(current_years()))
     await callback.answer()
 
 
@@ -233,71 +193,6 @@ async def days_done(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 # --------------------------------------------------------------------------- #
-#  Ветка C — одноразовая (год → месяц → день)
-# --------------------------------------------------------------------------- #
-
-@router.callback_query(AddTaskStates.year_select, F.data.startswith("year:"))
-async def choose_year(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """Выбор года → переход к выбору месяца (прошедшие месяцы скрыты)."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    year = int(callback.data.split(":", 1)[1])
-    data = await state.get_data()
-    today = await _user_today(repo, callback.from_user.id)
-    min_month = today.month if year == today.year else 1
-    await state.update_data(year=year)
-    await state.set_state(AddTaskStates.month_select)
-    text = (
-        f"{escape_md(data['name'])}\n"
-        f"{escape_md(f'Одноразовая · {year}')}\n\n{escape_md(TEXTS['add_task_month'])}"
-    )
-    await callback.message.edit_text(text, reply_markup=month_kb(year, min_month))
-    await callback.answer()
-
-
-@router.callback_query(AddTaskStates.month_select, F.data.startswith("month:"))
-async def choose_month(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
-    """Выбор месяца → переход к выбору дня (прошедшие дни скрыты)."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    month = int(callback.data.split(":", 1)[1])
-    data = await state.get_data()
-    year = data["year"]
-    today = await _user_today(repo, callback.from_user.id)
-    min_day = today.day if (year == today.year and month == today.month) else 1
-    await state.update_data(month=month)
-    await state.set_state(AddTaskStates.day_select)
-    text = (
-        f"{escape_md(data['name'])}\n"
-        f"{escape_md(f'Одноразовая · {MONTHS[month]} {year}')}\n\n"
-        f"{escape_md(TEXTS['add_task_day'])}"
-    )
-    await callback.message.edit_text(text, reply_markup=day_kb(year, month, min_day))
-    await callback.answer()
-
-
-@router.callback_query(AddTaskStates.day_select, F.data.startswith("dateday:"))
-async def choose_day(callback: CallbackQuery, state: FSMContext) -> None:
-    """Выбор дня → переход к вопросу о напоминании."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    day = int(callback.data.split(":", 1)[1])
-    await state.update_data(day=day)
-    data = await state.get_data()
-    await state.set_state(AddTaskStates.has_reminder)
-    date_str = _build_date(data).strftime("%d.%m.%Y")
-    text = (
-        f"{escape_md(data['name'])}\n{escape_md(f'Одноразовая · {date_str}')}\n\n"
-        f"{escape_md(TEXTS['add_task_has_reminder'])}"
-    )
-    await callback.message.edit_text(text, reply_markup=has_reminder_kb())
-    await callback.answer()
-
-
-# --------------------------------------------------------------------------- #
 #  Вопрос о напоминании
 # --------------------------------------------------------------------------- #
 
@@ -322,22 +217,15 @@ async def reminder_no(
 async def reminder_yes(
     callback: CallbackQuery,
     state: FSMContext,
-    repo: Repository,
 ) -> None:
     """С напоминанием — запросить время (убираем inline-кнопки)."""
     if callback.message is None:
         await callback.answer()
         return
     data = await state.get_data()
-    today = await _user_today(repo, callback.from_user.id)
-    key = (
-        "add_task_reminder_time_today"
-        if _is_one_time_today(data, today)
-        else "add_task_reminder_time"
-    )
     text = (
         f"{escape_md(data['name'])}\n{escape_md(_freq_summary(data))}\n\n"
-        f"{escape_md(TEXTS[key])}"
+        f"{escape_md(TEXTS['add_task_reminder_time'])}"
     )
     await state.set_state(AddTaskStates.reminder_time)
     await callback.message.edit_text(text, reply_markup=reminder_time_back_kb())
@@ -357,17 +245,6 @@ async def reminder_time_input(
         await message.answer(escape_md(TEXTS["invalid_time_format"]))
         return
 
-    data = await state.get_data()
-    today = await _user_today(repo, message.from_user.id)
-    if _is_one_time_today(data, today):
-        # Для сегодняшней одноразовой задачи время должно быть в будущем.
-        tz = pytz.timezone((await repo.get_user(message.from_user.id)).timezone)
-        now = datetime.now(tz)
-        target = tz.localize(datetime.combine(today, parsed))
-        if target <= now:
-            await message.answer(escape_md(TEXTS["time_in_past"]))
-            return
-
     confirm = await _create_task(state, repo, scheduler, message.from_user.id, parsed)
     await message.answer(confirm, reply_markup=REMOVE_KB)
 
@@ -379,12 +256,9 @@ async def reminder_time_input(
 #  (например, дни недели) сохраняются.
 # --------------------------------------------------------------------------- #
 
-@router.callback_query(
-    StateFilter(AddTaskStates.days_select, AddTaskStates.year_select),
-    F.data == "add_back_freq",
-)
+@router.callback_query(AddTaskStates.days_select, F.data == "add_back_freq")
 async def add_back_freq(callback: CallbackQuery, state: FSMContext) -> None:
-    """«‹ Назад» с выбора дней/года — вернуть к выбору частоты."""
+    """«‹ Назад» с выбора дней — вернуть к выбору частоты."""
     if callback.message is None:
         await callback.answer()
         return
@@ -395,51 +269,11 @@ async def add_back_freq(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.callback_query(AddTaskStates.month_select, F.data == "add_back_to_year")
-async def add_back_to_year(callback: CallbackQuery, state: FSMContext) -> None:
-    """«‹ Назад» с выбора месяца — вернуть к выбору года."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    data = await state.get_data()
-    await state.set_state(AddTaskStates.year_select)
-    text = (
-        f"{escape_md(data['name'])}\n{escape_md('Одноразовая')}\n\n"
-        f"{escape_md(TEXTS['add_task_year'])}"
-    )
-    await callback.message.edit_text(text, reply_markup=year_kb(current_years()))
-    await callback.answer()
-
-
-@router.callback_query(AddTaskStates.day_select, F.data == "add_back_to_month")
-async def add_back_to_month(
-    callback: CallbackQuery, state: FSMContext, repo: Repository
-) -> None:
-    """«‹ Назад» с выбора дня — вернуть к выбору месяца."""
-    if callback.message is None:
-        await callback.answer()
-        return
-    data = await state.get_data()
-    year = data["year"]
-    today = await _user_today(repo, callback.from_user.id)
-    min_month = today.month if year == today.year else 1
-    await state.set_state(AddTaskStates.month_select)
-    text = (
-        f"{escape_md(data['name'])}\n"
-        f"{escape_md(f'Одноразовая · {year}')}\n\n{escape_md(TEXTS['add_task_month'])}"
-    )
-    await callback.message.edit_text(text, reply_markup=month_kb(year, min_month))
-    await callback.answer()
-
-
 @router.callback_query(AddTaskStates.has_reminder, F.data == "add_back_from_reminder")
-async def add_back_from_reminder(
-    callback: CallbackQuery, state: FSMContext, repo: Repository
-) -> None:
+async def add_back_from_reminder(callback: CallbackQuery, state: FSMContext) -> None:
     """«‹ Назад» с вопроса о напоминании — вернуть к предыдущему шагу по ветке частоты.
 
-    daily → выбор частоты, specific_days → выбор дней (с сохранёнными галочками),
-    one_time → выбор дня.
+    daily → выбор частоты, specific_days → выбор дней (с сохранёнными галочками).
     """
     if callback.message is None:
         await callback.answer()
@@ -451,22 +285,11 @@ async def add_back_from_reminder(
         await state.set_state(AddTaskStates.frequency)
         text = f"{escape_md(name)}\n\n{escape_md(TEXTS['add_task_frequency'])}"
         await callback.message.edit_text(text, reply_markup=frequency_kb())
-    elif freq == "specific_days":
+    else:  # specific_days
         await state.set_state(AddTaskStates.days_select)
         days = set(data.get("days", []))
         text = f"{escape_md(name)}\n\n{escape_md(TEXTS['add_task_days'])}"
         await callback.message.edit_text(text, reply_markup=days_kb(days))
-    else:  # one_time
-        await state.set_state(AddTaskStates.day_select)
-        year, month = data["year"], data["month"]
-        today = await _user_today(repo, callback.from_user.id)
-        min_day = today.day if (year == today.year and month == today.month) else 1
-        text = (
-            f"{escape_md(name)}\n"
-            f"{escape_md(f'Одноразовая · {MONTHS[month]} {year}')}\n\n"
-            f"{escape_md(TEXTS['add_task_day'])}"
-        )
-        await callback.message.edit_text(text, reply_markup=day_kb(year, month, min_day))
     await callback.answer()
 
 
@@ -501,14 +324,12 @@ async def _create_task(
         if data["frequency"] == "specific_days"
         else None
     )
-    one_time_date = _build_date(data) if data["frequency"] == "one_time" else None
 
     task = await repo.create_task(
         user_id=user_id,
         name=data["name"],
         frequency_type=freq,
         days=days_str,
-        one_time_date=one_time_date,
         reminder_time=reminder_time,
     )
     if reminder_time is not None:

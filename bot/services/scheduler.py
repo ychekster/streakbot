@@ -20,11 +20,9 @@ from apscheduler.triggers.date import DateTrigger
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bot.constants import TEXTS
 from bot.database.models import FrequencyType, Task, User
 from bot.database.repository import Repository
-from bot.keyboards.builders import REMOVE_KB, reminder_kb
-from bot.utils.validators import escape_md
+from bot.keyboards.builders import REMOVE_KB
 
 # Идентификатор глобального задания истечения просроченных логов.
 EXPIRE_JOB_ID = "global_expire_tasks"
@@ -141,14 +139,6 @@ class SchedulerService:
                 minute=task.reminder_time.minute,
                 timezone=tz,
             )
-        elif task.frequency_type == FrequencyType.one_time and task.one_time_date:
-            run_dt = tz.localize(
-                datetime.combine(task.one_time_date, task.reminder_time)
-            )
-            # Если момент уже в прошлом — напоминание не имеет смысла.
-            if run_dt <= datetime.now(tz):
-                return
-            trigger = DateTrigger(run_date=run_dt)
         else:
             return
 
@@ -291,7 +281,10 @@ class SchedulerService:
         logger.info("Evening digest sent to user {}", user_id)
 
     async def send_reminder(self, task_id: int) -> None:
-        """Отправить напоминание по конкретной задаче (с кнопкой «Выполнена»)."""
+        """Отправить напоминание по задаче (с кнопкой-галочкой отметки, как в /today)."""
+        # Ленивый импорт, чтобы избежать цикла импорта с хендлерами.
+        from bot.handlers.today import build_reminder
+
         async with self.session_factory() as session:
             repo = Repository(session)
             task = await repo.get_task(task_id)
@@ -300,38 +293,23 @@ class SchedulerService:
             user = await repo.get_user(task.user_id)
             if user is None or not user.is_active:
                 return
-            if task.frequency_type == FrequencyType.one_time and task.one_time_date:
-                target_date = task.one_time_date
-            else:
-                target_date = datetime.now(self._user_tz(user)).date()
-            text = escape_md(TEXTS["reminder_text"].format(name=task.name))
-            keyboard = reminder_kb(task.id, target_date)
+            target_date = datetime.now(self._user_tz(user)).date()
+            text, keyboard = await build_reminder(repo, task, target_date)
             user_id = task.user_id
         await self._safe_send(user_id, text, reply_markup=keyboard)
         logger.info("Reminder sent for task {}", task_id)
 
     async def check_and_expire_tasks(self) -> None:
-        """Перевести просроченные pending-логи в missed и «забыть» старые one_time.
+        """Перевести просроченные pending-логи в статус missed.
 
-        Одноразовая задача забывается (деактивируется) через сутки после
-        истечения срока: на дату D она ещё видна в дайджесте дня D+1 как
-        просроченная, а начиная с D+2 — деактивируется и её напоминание снимается.
+        Логи с датой раньше сегодняшней (UTC), оставшиеся в pending, считаются
+        окончательно пропущенными и переводятся в missed.
         """
         today_utc = datetime.now(pytz.utc).date()
-        forget_cutoff = today_utc - timedelta(days=1)
         async with self.session_factory() as session:
             repo = Repository(session)
             expired = await repo.get_expired_pending_logs(today_utc)
             if expired:
                 await repo.mark_logs_missed(expired)
-
-            forgettable = await repo.get_forgettable_one_time_tasks(forget_cutoff)
-            for task in forgettable:
-                await repo.soft_delete_task(task)
-                self.remove_task_reminder_job(task.id)
-
             await session.commit()
-        logger.info(
-            "Expired {} pending logs, forgot {} one-time tasks",
-            len(expired), len(forgettable),
-        )
+        logger.info("Expired {} pending logs", len(expired))
