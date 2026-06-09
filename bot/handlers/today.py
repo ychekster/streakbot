@@ -387,6 +387,23 @@ async def _morning_final_view(
     return text, keyboard
 
 
+async def _edit_digest(
+    message: Message, text: str, reply_markup: InlineKeyboardMarkup | None
+) -> None:
+    """Отредактировать сообщение утреннего дайджеста, НЕ трогая изображение.
+
+    Утренний дайджест приходит как фото-баннер с подписью (текст дайджеста), поэтому
+    шаги флоу просроченных (`md_*`) редактируют ПОДПИСЬ — само изображение остаётся
+    неизменным. Если дайджест по какой-то причине ушёл обычным текстом (без баннера —
+    у пользователя нет активных задач или не удалось отправить фото), редактируется
+    текст (фолбэк по типу сообщения).
+    """
+    if message.photo:
+        await message.edit_caption(caption=text, reply_markup=reply_markup)
+    else:
+        await message.edit_text(text, reply_markup=reply_markup)
+
+
 @router.callback_query(F.data == "md_mark")
 async def md_mark(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
     """Inline-кнопка «Отметить вчерашние задачи» — открыть экран выбора (без фильтра состояния)."""
@@ -400,13 +417,14 @@ async def md_mark(callback: CallbackQuery, state: FSMContext, repo: Repository) 
         # Просроченных уже нет — возвращаем дайджест в исходный вид (с кнопками).
         await callback.answer(TEXTS["overdue_none"], show_alert=True)
         text, keyboard = await build_morning_digest(repo, user)
-        await callback.message.edit_text(text, reply_markup=keyboard)
+        await _edit_digest(callback.message, text, keyboard)
         return
     await state.set_state(MarkingStates.active)
     await state.update_data(md_selected=[], md_page=0)
-    await callback.message.edit_text(
+    await _edit_digest(
+        callback.message,
         _overdue_select_text(overdue),
-        reply_markup=overdue_select_kb([(t.id, t.name) for t in overdue], set(), 0),
+        overdue_select_kb([(t.id, t.name) for t in overdue], set(), 0),
     )
     await callback.answer()
 
@@ -475,8 +493,8 @@ async def md_done(callback: CallbackQuery, state: FSMContext, repo: Repository) 
     overdue = await _overdue_tasks(repo, user, today)
     data = await state.get_data()
     selected = set(data.get("md_selected", [])) & {task.id for task in overdue}
-    await callback.message.edit_text(
-        _overdue_confirm_text(overdue, selected), reply_markup=overdue_confirm_kb()
+    await _edit_digest(
+        callback.message, _overdue_confirm_text(overdue, selected), overdue_confirm_kb()
     )
     await callback.answer()
 
@@ -489,7 +507,7 @@ async def md_back_digest(callback: CallbackQuery, state: FSMContext, repo: Repos
         return
     user = await repo.get_user(callback.from_user.id)
     text, keyboard = await build_morning_digest(repo, user)
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    await _edit_digest(callback.message, text, keyboard)
     await state.clear()
     await callback.answer()
 
@@ -506,9 +524,10 @@ async def md_back_select(callback: CallbackQuery, state: FSMContext, repo: Repos
     data = await state.get_data()
     selected = set(data.get("md_selected", [])) & {task.id for task in overdue}
     page = data.get("md_page", 0)
-    await callback.message.edit_text(
+    await _edit_digest(
+        callback.message,
         _overdue_select_text(overdue),
-        reply_markup=overdue_select_kb([(t.id, t.name) for t in overdue], selected, page),
+        overdue_select_kb([(t.id, t.name) for t in overdue], selected, page),
     )
     await callback.answer()
 
@@ -527,8 +546,8 @@ async def md_confirm(callback: CallbackQuery, state: FSMContext, repo: Repositor
     if now >= deadline:
         # Дедлайн прошёл — показываем экран «время вышло»; состояние остаётся
         # активным, чтобы сработала кнопка `md_expired_ok`.
-        await callback.message.edit_text(
-            escape_md(TEXTS["overdue_expired"]), reply_markup=overdue_expired_kb()
+        await _edit_digest(
+            callback.message, escape_md(TEXTS["overdue_expired"]), overdue_expired_kb()
         )
         await callback.answer()
         return
@@ -550,7 +569,7 @@ async def md_confirm(callback: CallbackQuery, state: FSMContext, repo: Repositor
         user.telegram_id, done_count, len(overdue),
     )
     text, keyboard = await _morning_final_view(repo, user)
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    await _edit_digest(callback.message, text, keyboard)
     await state.clear()
     await callback.answer()
 
@@ -563,7 +582,7 @@ async def md_expired_ok(callback: CallbackQuery, state: FSMContext, repo: Reposi
         return
     user = await repo.get_user(callback.from_user.id)
     text, keyboard = await _morning_final_view(repo, user)
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    await _edit_digest(callback.message, text, keyboard)
     await state.clear()
     await callback.answer()
 

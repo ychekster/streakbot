@@ -7,12 +7,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import tempfile
+from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
 
 import pytz
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.fsm.storage.base import BaseStorage, StorageKey
+from aiogram.types import BufferedInputFile
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -32,6 +35,10 @@ EXPIRE_JOB_ID = "global_expire_tasks"
 # снова. Максимум 3 отложки — на 4-й итерации уведомление уходит безусловно.
 _ACTIVITY_WINDOW = timedelta(minutes=5)
 _MAX_POSTPONES = 3
+
+# За сколько до утреннего дайджеста заранее генерируется баннер стриков, чтобы к
+# моменту отправки PNG-файл уже был готов (генерация — отдельной cron-джобой).
+_BANNER_PREP_LEAD = timedelta(minutes=5)
 
 
 class SchedulerService:
@@ -83,12 +90,29 @@ class SchedulerService:
         except Exception:  # noqa: BLE001
             return pytz.utc
 
+    @staticmethod
+    def _banner_path(user_id: int) -> Path:
+        """Путь к временному файлу баннера пользователя (в системном temp-каталоге)."""
+        return Path(tempfile.gettempdir()) / f"streakbot_morning_banner_{user_id}.png"
+
+    @staticmethod
+    def _banner_prep_time(morning_time: time) -> tuple[int, int]:
+        """Время запуска подготовки баннера: за `_BANNER_PREP_LEAD` до утреннего дайджеста.
+
+        Возвращает (час, минута). Сдвиг считается по модулю суток на случай, если
+        вычитание увело бы время за полночь.
+        """
+        lead = int(_BANNER_PREP_LEAD.total_seconds() // 60)
+        total = (morning_time.hour * 60 + morning_time.minute - lead) % (24 * 60)
+        return divmod(total, 60)
+
     # ------------------------------------------------------------------ #
     #  Регистрация jobs
     # ------------------------------------------------------------------ #
 
     def setup_user_jobs(self, user: User) -> None:
-        """Создать/обновить cron-задания утреннего и вечернего дайджестов."""
+        """Создать/обновить cron-задания: утренний и вечерний дайджесты + подготовку
+        баннера утра (за `_BANNER_PREP_LEAD` до утреннего дайджеста)."""
         tz = self._user_tz(user)
         morning_id = f"morning_{user.telegram_id}"
         evening_id = f"evening_{user.telegram_id}"
@@ -102,6 +126,16 @@ class SchedulerService:
                     timezone=tz,
                 ),
                 id=morning_id,
+                replace_existing=True,
+                args=[user.telegram_id],
+            )
+            # Баннер стриков генерируем заранее (за _BANNER_PREP_LEAD до дайджеста),
+            # чтобы к моменту отправки PNG-файл уже был готов.
+            prep_hour, prep_minute = self._banner_prep_time(user.morning_time)
+            self.scheduler.add_job(
+                self.prepare_morning_banner,
+                trigger=CronTrigger(hour=prep_hour, minute=prep_minute, timezone=tz),
+                id=f"morning_prep_{user.telegram_id}",
                 replace_existing=True,
                 args=[user.telegram_id],
             )
@@ -225,13 +259,139 @@ class SchedulerService:
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to send message to {}: {}", user_id, exc)
 
+    # ------------------------------------------------------------------ #
+    #  Баннер стриков для утреннего дайджеста
+    # ------------------------------------------------------------------ #
+
+    async def _build_morning_banner(self, user_id: int) -> bytes | None:
+        """Сгенерировать PNG-баннер стриков пользователя (или None, если задач нет).
+
+        Берутся первые `MORNING_BANNER_MAX_CELLS` активных задач; для каждой —
+        название и текущий стрик (с учётом часового пояса, как в /stats). Доступ к БД
+        только на чтение, поэтому коммит не нужен.
+        """
+        # Ленивый импорт, чтобы избежать цикла импорта.
+        from bot.services.morning_image import (
+            MORNING_BANNER_MAX_CELLS,
+            MorningStreakCell,
+            render_morning_banner,
+        )
+        from bot.services.streak import get_current_streak
+
+        async with self.session_factory() as session:
+            repo = Repository(session)
+            user = await repo.get_user(user_id)
+            if user is None or not user.is_active:
+                return None
+            tz = self._user_tz(user)
+            tasks = await repo.get_active_tasks(user_id)
+            cells: list[MorningStreakCell] = []
+            for task in tasks[:MORNING_BANNER_MAX_CELLS]:
+                current = await get_current_streak(repo, task.id, tz)
+                cells.append(MorningStreakCell(name=task.name, current_streak=current))
+        if not cells:
+            return None
+        return await render_morning_banner(cells)
+
+    async def prepare_morning_banner(self, user_id: int) -> None:
+        """Заранее сгенерировать баннер и сохранить во временный файл.
+
+        Запускается отдельной cron-джобой за `_BANNER_PREP_LEAD` до утреннего
+        дайджеста, чтобы к моменту отправки файл уже был готов. Ошибки генерации и
+        записи не критичны: при отсутствии файла отправка сгенерирует баннер на лету.
+        """
+        try:
+            image = await self._build_morning_banner(user_id)
+        except Exception as exc:  # noqa: BLE001 — баннер не критичен для дайджеста
+            logger.error("Failed to build morning banner for {}: {}", user_id, exc)
+            return
+        if image is None:
+            return  # у пользователя нет активных задач — баннер не нужен
+        path = self._banner_path(user_id)
+        try:
+            path.write_bytes(image)
+            logger.info("Morning banner prepared for user {} ({} bytes)", user_id, len(image))
+        except OSError as exc:
+            logger.error("Failed to write morning banner {}: {}", path, exc)
+
+    async def _take_morning_banner(self, user_id: int) -> bytes | None:
+        """Взять баннер для отправки и удалить временный файл.
+
+        Сначала пробуем заранее подготовленный файл; если его нет (бот стартовал
+        после prep-джобы или она не успела) — генерируем баннер на лету. Временный
+        файл после этого удаляется. None — если у пользователя нет активных задач или
+        баннер не удалось получить (тогда дайджест уйдёт обычным текстом).
+        """
+        path = self._banner_path(user_id)
+        image: bytes | None = None
+        if path.exists():
+            try:
+                image = path.read_bytes()
+            except OSError as exc:
+                logger.warning("Could not read morning banner {}: {}", path, exc)
+        if image is None:
+            # Фолбэк: файла нет — генерируем прямо сейчас.
+            try:
+                image = await self._build_morning_banner(user_id)
+            except Exception as exc:  # noqa: BLE001 — баннер не критичен
+                logger.error("Failed to build fallback morning banner for {}: {}", user_id, exc)
+        # Чистим временный файл (если он был подготовлен заранее).
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not delete morning banner {}: {}", path, exc)
+        return image
+
+    async def _safe_send_photo(self, user_id: int, image: bytes, caption: str, reply_markup) -> bool:
+        """Отправить фото-баннер с подписью и клавиатурой одним сообщением.
+
+        True — доставлено или пользователь заблокировал бота (повторять текстом не
+        нужно); False — иная ошибка отправки (например, слишком длинная подпись), тогда
+        вызывающий код отправит дайджест обычным текстом, чтобы он не потерялся.
+        """
+        try:
+            await self.bot.send_photo(
+                user_id,
+                BufferedInputFile(image, filename="morning.png"),
+                caption=caption,
+                reply_markup=reply_markup,
+            )
+            return True
+        except TelegramForbiddenError:
+            logger.info("User {} blocked the bot — marking inactive", user_id)
+            async with self.session_factory() as session:
+                repo = Repository(session)
+                await repo.set_active(user_id, False)
+                await session.commit()
+            return True
+        except Exception as exc:  # noqa: BLE001 — фолбэк отправит дайджест текстом
+            logger.error("Failed to send morning banner photo to {}: {}", user_id, exc)
+            return False
+
+    async def _send_morning_digest_message(self, user_id: int, text: str, keyboard) -> None:
+        """Отправить утренний дайджест: баннер как фото с подписью (текст дайджеста) и
+        inline-клавиатурой — одним сообщением.
+
+        Если баннера нет (у пользователя нет активных задач) — дайджест уходит обычным
+        текстом. Если отправка фото не удалась (например, подпись длиннее лимита
+        Telegram) — тоже фолбэк на текст, чтобы дайджест не потерялся.
+        """
+        image = await self._take_morning_banner(user_id)
+        if image is not None and await self._safe_send_photo(
+            user_id, image, text, keyboard or REMOVE_KB
+        ):
+            return
+        await self._safe_send(user_id, text, reply_markup=keyboard or REMOVE_KB)
+
     async def send_morning_digest(self, user_id: int, attempt: int = 0) -> None:
-        """Утренний дайджест: задачи на сегодня + блок просроченных + pending-логи.
+        """Утренний дайджест: баннер стриков + задачи на сегодня + блок просроченных.
 
         Не отправляется повторно, если уже был отправлен сегодня (смена настроек
         не переотправляет). Откладывается при недавней активности (см.
         `_maybe_postpone`). Перед отправкой сбрасывает FSM-состояние и убирает
-        reply-клавиатуру (или показывает inline-кнопку отметки просроченных).
+        reply-клавиатуру (или показывает inline-кнопку отметки просроченных). Баннер
+        прикрепляется к сообщению дайджеста как фото с подписью — одним сообщением
+        (см. `_send_morning_digest_message`).
         """
         # Ленивый импорт, чтобы избежать цикла импорта с хендлерами.
         from bot.handlers.today import build_morning_digest
@@ -250,7 +410,7 @@ class SchedulerService:
             await session.commit()
 
         await self._reset_user_state(user_id)
-        await self._safe_send(user_id, text, reply_markup=keyboard or REMOVE_KB)
+        await self._send_morning_digest_message(user_id, text, keyboard)
         self.digest_sent[(user_id, "morning")] = today
         logger.info("Morning digest sent to user {}", user_id)
 
