@@ -15,7 +15,7 @@ import pytz
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.fsm.storage.base import BaseStorage, StorageKey
-from aiogram.types import BufferedInputFile
+from aiogram.types import BufferedInputFile, FSInputFile
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -92,8 +92,13 @@ class SchedulerService:
 
     @staticmethod
     def _banner_path(user_id: int) -> Path:
-        """Путь к временному файлу баннера пользователя (в системном temp-каталоге)."""
+        """Путь к временному файлу утреннего баннера пользователя (в системном temp-каталоге)."""
         return Path(tempfile.gettempdir()) / f"streakbot_morning_banner_{user_id}.png"
+
+    @staticmethod
+    def _reminder_banner_path(task_id: int) -> Path:
+        """Путь к временному файлу баннера напоминания задачи (в системном temp-каталоге)."""
+        return Path(tempfile.gettempdir()) / f"streakbot_reminder_banner_{task_id}.png"
 
     @staticmethod
     def _banner_prep_time(morning_time: time) -> tuple[int, int]:
@@ -342,19 +347,18 @@ class SchedulerService:
             logger.warning("Could not delete morning banner {}: {}", path, exc)
         return image
 
-    async def _safe_send_photo(self, user_id: int, image: bytes, caption: str, reply_markup) -> bool:
-        """Отправить фото-баннер с подписью и клавиатурой одним сообщением.
+    async def _safe_send_photo(self, user_id: int, photo, caption: str, reply_markup) -> bool:
+        """Отправить фото с подписью и клавиатурой одним сообщением.
 
-        True — доставлено или пользователь заблокировал бота (повторять текстом не
-        нужно); False — иная ошибка отправки (например, слишком длинная подпись), тогда
-        вызывающий код отправит дайджест обычным текстом, чтобы он не потерялся.
+        `photo` — готовый InputFile (например, `BufferedInputFile` из байтов или
+        `FSInputFile` из временного файла). True — доставлено или пользователь
+        заблокировал бота (повторять текстом не нужно); False — иная ошибка отправки
+        (например, слишком длинная подпись), тогда вызывающий код отправит сообщение
+        обычным текстом, чтобы оно не потерялось.
         """
         try:
             await self.bot.send_photo(
-                user_id,
-                BufferedInputFile(image, filename="morning.png"),
-                caption=caption,
-                reply_markup=reply_markup,
+                user_id, photo, caption=caption, reply_markup=reply_markup
             )
             return True
         except TelegramForbiddenError:
@@ -364,8 +368,8 @@ class SchedulerService:
                 await repo.set_active(user_id, False)
                 await session.commit()
             return True
-        except Exception as exc:  # noqa: BLE001 — фолбэк отправит дайджест текстом
-            logger.error("Failed to send morning banner photo to {}: {}", user_id, exc)
+        except Exception as exc:  # noqa: BLE001 — фолбэк отправит сообщение текстом
+            logger.error("Failed to send photo to {}: {}", user_id, exc)
             return False
 
     async def _send_morning_digest_message(self, user_id: int, text: str, keyboard) -> None:
@@ -378,7 +382,10 @@ class SchedulerService:
         """
         image = await self._take_morning_banner(user_id)
         if image is not None and await self._safe_send_photo(
-            user_id, image, text, keyboard or REMOVE_KB
+            user_id,
+            BufferedInputFile(image, filename="morning.png"),
+            text,
+            keyboard or REMOVE_KB,
         ):
             return
         await self._safe_send(user_id, text, reply_markup=keyboard or REMOVE_KB)
@@ -440,8 +447,66 @@ class SchedulerService:
         self.digest_sent[(user_id, "evening")] = today
         logger.info("Evening digest sent to user {}", user_id)
 
+    async def _build_reminder_banner(
+        self, repo: Repository, task: Task, target_date, tz: pytz.BaseTzInfo
+    ) -> bytes:
+        """Сгенерировать PNG-баннер напоминания: название, текущий и рекордный стрик и
+        сетку последних 30 дней (карточка как в /stats, поверх своего шаблона).
+
+        Стрики и сетка считаются по БД (с учётом часового пояса, как в /stats).
+        """
+        # Ленивый импорт, чтобы избежать цикла импорта.
+        from bot.services.reminder_image import render_reminder_banner
+        from bot.services.stats_image import TaskStatsCard
+        from bot.services.streak import (
+            get_current_streak,
+            get_last_30_days,
+            get_max_streak,
+        )
+
+        card = TaskStatsCard(
+            name=task.name,
+            current_streak=await get_current_streak(repo, task.id, tz),
+            max_streak=await get_max_streak(repo, task.id),
+            last_30_days=await get_last_30_days(repo, task.id, target_date),
+        )
+        return await render_reminder_banner(card)
+
+    async def _send_reminder_message(
+        self, user_id: int, task_id: int, text: str, keyboard, image: bytes | None
+    ) -> None:
+        """Отправить напоминание: баннер как фото с подписью (текст напоминания) и
+        кнопкой-галочкой. Баннер сохраняется во временный файл, отправляется из него и
+        файл удаляется. Если баннера нет или фото не ушло — напоминание уходит текстом.
+        """
+        if image is None:
+            await self._safe_send(user_id, text, reply_markup=keyboard)
+            return
+        path = self._reminder_banner_path(task_id)
+        try:
+            path.write_bytes(image)
+        except OSError as exc:
+            logger.error("Failed to write reminder banner {}: {}", path, exc)
+            await self._safe_send(user_id, text, reply_markup=keyboard)
+            return
+        try:
+            if not await self._safe_send_photo(user_id, FSInputFile(path), text, keyboard):
+                await self._safe_send(user_id, text, reply_markup=keyboard)
+        finally:
+            # После отправки временный файл удаляем в любом случае.
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Could not delete reminder banner {}: {}", path, exc)
+
     async def send_reminder(self, task_id: int) -> None:
-        """Отправить напоминание по задаче (с кнопкой-галочкой отметки, как в /today)."""
+        """Отправить напоминание по задаче: баннер-фото со стриками + подпись и
+        кнопка-галочка отметки (как в /today).
+
+        Баннер генерируется в момент отправки и удаляется после (см.
+        `_send_reminder_message`). Если баннер не сгенерировался или фото не ушло —
+        напоминание уходит обычным текстом.
+        """
         # Ленивый импорт, чтобы избежать цикла импорта с хендлерами.
         from bot.handlers.today import build_reminder
 
@@ -453,10 +518,16 @@ class SchedulerService:
             user = await repo.get_user(task.user_id)
             if user is None or not user.is_active:
                 return
-            target_date = datetime.now(self._user_tz(user)).date()
+            tz = self._user_tz(user)
+            target_date = datetime.now(tz).date()
             text, keyboard = await build_reminder(repo, task, target_date)
+            try:
+                image = await self._build_reminder_banner(repo, task, target_date, tz)
+            except Exception as exc:  # noqa: BLE001 — баннер не критичен, напоминание уйдёт текстом
+                logger.error("Failed to build reminder banner for task {}: {}", task_id, exc)
+                image = None
             user_id = task.user_id
-        await self._safe_send(user_id, text, reply_markup=keyboard)
+        await self._send_reminder_message(user_id, task_id, text, keyboard, image)
         logger.info("Reminder sent for task {}", task_id)
 
     async def check_and_expire_tasks(self) -> None:
