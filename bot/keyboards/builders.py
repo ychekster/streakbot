@@ -15,6 +15,7 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    WebAppInfo,
 )
 
 from bot.constants import (
@@ -34,6 +35,7 @@ from bot.constants import (
     BTN_NAV_NEXT,
     BTN_NAV_PREV,
     BTN_NO,
+    BTN_OPEN_APP,
     BTN_REM_CHANGE,
     BTN_REM_REMOVE,
     BTN_REMINDER_NO,
@@ -66,6 +68,22 @@ _BUTTON_NAME_LIMIT = 22
 
 # Готовый объект «убрать reply-клавиатуру».
 REMOVE_KB = ReplyKeyboardRemove()
+
+
+def main_menu_kb(tma_url: str | None) -> InlineKeyboardMarkup | None:
+    """Inline-кнопка открытия Telegram Mini App под сообщением главного меню.
+
+    Возвращает клавиатуру с одной WebApp-кнопкой, если задан `tma_url` (публичный
+    HTTPS-адрес фронтенда из tma/), иначе None — тогда меню показывается без кнопки,
+    как раньше. Кнопка-WebApp открывает мини-приложение прямо внутри Telegram.
+    """
+    if not tma_url:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=BTN_OPEN_APP, web_app=WebAppInfo(url=tma_url))]
+        ]
+    )
 
 
 # --------------------------------------------------------------------------- #

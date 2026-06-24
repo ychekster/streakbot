@@ -1,0 +1,67 @@
+/* Заглушки повторяют геометрию карточек привычек, с мягким мерцанием. */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-card-gap);
+}
+
+.card {
+  background-color: var(--color-card);
+  border-radius: var(--radius-card);
+  padding: var(--space-card-padding);
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-row-gap);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.shimmer {
+  display: block;
+  border-radius: 8px;
+  background: linear-gradient(
+    90deg,
+    var(--color-skeleton) 25%,
+    var(--color-skeleton-highlight) 37%,
+    var(--color-skeleton) 63%
+  );
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+
+.name {
+  height: 18px;
+  width: 55%;
+}
+
+.check {
+  height: var(--check-size);
+  width: var(--check-size);
+  border-radius: var(--radius-pill);
+}
+
+.grid {
+  height: 44px;
+  width: 100%;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer {
+    animation: none;
+  }
+}

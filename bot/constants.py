@@ -333,6 +333,9 @@ BTN_MARK_OVERDUE = "Отметить вчерашние задачи"
 BTN_MARK_TODAY = "Отметить выполненные"
 BTN_CONFIRM = "Подтвердить"
 
+# Кнопка открытия Telegram Mini App в главном меню (если задан TMA_URL).
+BTN_OPEN_APP = "📱 Открыть приложение"
+
 # Тексты inline-кнопок просмотра задач (/tasks).
 BTN_TASKS_ALL = "Все задачи"
 BTN_TASKS_TODAY = "Задачи на сегодня"

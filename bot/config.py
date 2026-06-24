@@ -35,6 +35,11 @@ class Config(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_file: str = Field(default="logs/bot.log", alias="LOG_FILE")
 
+    # Публичный URL Telegram Mini App (фронтенд из tma/). Если задан — в главном
+    # меню появляется кнопка для открытия мини-приложения; если пуст — меню как
+    # раньше, без кнопки. URL должен быть HTTPS (требование Telegram WebApp).
+    tma_url: str | None = Field(default=None, alias="TMA_URL")
+
 
 @lru_cache
 def load_config() -> Config:

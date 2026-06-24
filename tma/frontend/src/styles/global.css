@@ -1,0 +1,40 @@
+/* Глобальные стили и сброс. Подключается первым в main.tsx (после variables.css). */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-family);
+  color: var(--color-text-primary);
+  background-color: var(--color-background);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* Запрет «оттягивания» страницы — приложение во весь экран. */
+  overscroll-behavior: none;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+  /* Убрать синюю подсветку нажатия на мобильных. */
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Аккуратная прокрутка списка. */
+#root {
+  display: flex;
+  flex-direction: column;
+}

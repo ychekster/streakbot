@@ -12,11 +12,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from loguru import logger
 
+from bot.config import Config
 from bot.constants import TEXTS
 from bot.database.models import User
 from bot.database.repository import Repository
 from bot.handlers.onboarding import OnboardingStates
-from bot.keyboards.builders import REMOVE_KB, start_kb
+from bot.keyboards.builders import REMOVE_KB, main_menu_kb, start_kb
 from bot.utils.validators import escape_md
 
 router = Router(name="start")
@@ -33,8 +34,22 @@ async def begin_onboarding(
     await message.answer(escape_md(TEXTS["welcome"]), reply_markup=start_kb())
 
 
+async def _show_main_menu(message: Message, config: Config) -> None:
+    """Показать главное меню с кнопкой Mini App, если задан TMA_URL.
+
+    Если URL мини-приложения не настроен — меню как раньше, с `REMOVE_KB`
+    (убирает возможную reply-клавиатуру предыдущих шагов).
+    """
+    await message.answer(
+        escape_md(TEXTS["main_menu"]),
+        reply_markup=main_menu_kb(config.tma_url) or REMOVE_KB,
+    )
+
+
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext, repo: Repository) -> None:
+async def cmd_start(
+    message: Message, state: FSMContext, repo: Repository, config: Config
+) -> None:
     """Обработать /start для всех трёх случаев: новый, недозарегистрированный, готовый."""
     tg = message.from_user
     user, created = await repo.get_or_create_user(tg.id, tg.username, tg.first_name)
@@ -52,14 +67,14 @@ async def cmd_start(message: Message, state: FSMContext, repo: Repository) -> No
         # Зарегистрированный пользователь — главное меню.
         await repo.update_profile(user, tg.username, tg.first_name)
         await state.clear()
-        await message.answer(escape_md(TEXTS["main_menu"]), reply_markup=REMOVE_KB)
+        await _show_main_menu(message, config)
 
 
 @router.message(Command("help"))
-async def cmd_help(message: Message, state: FSMContext) -> None:
+async def cmd_help(message: Message, state: FSMContext, config: Config) -> None:
     """/help для зарегистрированного пользователя — главное меню.
 
     Незарегистрированных сюда не пропустит middleware.
     """
     await state.clear()
-    await message.answer(escape_md(TEXTS["main_menu"]), reply_markup=REMOVE_KB)
+    await _show_main_menu(message, config)

@@ -1,0 +1,46 @@
+/* Состояние по центру свободного пространства экрана. */
+
+.container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 8px;
+  padding: 32px var(--space-screen-x);
+}
+
+.emoji {
+  font-size: 44px;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+
+.title {
+  font-size: var(--font-size-habit-name);
+  font-weight: var(--font-weight-habit-name);
+  color: var(--color-text-primary);
+}
+
+.description {
+  font-size: var(--font-size-body);
+  color: var(--color-text-secondary);
+  max-width: 280px;
+}
+
+.action {
+  margin-top: 12px;
+  padding: 10px 24px;
+  border-radius: var(--radius-pill);
+  background-color: var(--color-accent);
+  color: #ffffff;
+  font-size: var(--font-size-body);
+  font-weight: 600;
+  transition: transform var(--transition-fast), opacity var(--transition-fast);
+}
+
+.action:active {
+  transform: scale(0.96);
+  opacity: 0.9;
+}

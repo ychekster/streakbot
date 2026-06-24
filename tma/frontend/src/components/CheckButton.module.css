@@ -1,0 +1,40 @@
+/* Кнопка отметки: 28px, обводка 2px акцентным цветом; выполнено — залитый кружок с галочкой. */
+
+.button {
+  flex-shrink: 0;
+  width: var(--check-size);
+  height: var(--check-size);
+  border-radius: var(--radius-pill);
+  border: var(--check-stroke) solid var(--color-accent);
+  background-color: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  /* Плавный переход состояния — 150ms ease. */
+  transition: background-color var(--transition-fast),
+    border-color var(--transition-fast), transform var(--transition-fast);
+}
+
+.button:active {
+  transform: scale(0.92);
+}
+
+.done {
+  background-color: var(--color-accent);
+}
+
+.check {
+  width: 64%;
+  height: 64%;
+  color: var(--color-check-icon);
+  /* Галочка плавно проявляется и слегка «вырастает» при отметке. */
+  opacity: 0;
+  transform: scale(0.5);
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.done .check {
+  opacity: 1;
+  transform: scale(1);
+}

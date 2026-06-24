@@ -1,0 +1,25 @@
+/* Экран во всю высоту с учётом safe-area (чёлка сверху, home-indicator снизу). */
+
+.screen {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  padding-top: calc(env(safe-area-inset-top) + var(--space-screen-top));
+  padding-right: calc(env(safe-area-inset-right) + var(--space-screen-x));
+  padding-bottom: calc(env(safe-area-inset-bottom) + var(--space-screen-x));
+  padding-left: calc(env(safe-area-inset-left) + var(--space-screen-x));
+}
+
+.title {
+  font-size: var(--font-size-title);
+  font-weight: var(--font-weight-title);
+  letter-spacing: -0.02em;
+  margin-bottom: var(--space-title-bottom);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-card-gap);
+}

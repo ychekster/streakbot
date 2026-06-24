@@ -1,0 +1,58 @@
+/*
+ * Дизайн-токены приложения (стиль iOS 26 / Liquid Glass).
+ * Все числовые значения дизайна — цвета, размеры, отступы, скругления, тайминги —
+ * объявлены здесь и нигде в коде не хардкодятся.
+ */
+:root {
+  /* --- Цвета --- */
+  --color-background: #f2f2f7; /* системный светло-серый фон iOS */
+  --color-card: #ffffff;
+  --color-text-primary: #1c1c1e;
+  --color-text-secondary: #8e8e93;
+  --color-accent: #007aff; /* системный синий iOS */
+  /* Акцентный цвет с прозрачностью для пропущенных дней в годовой сетке (~20%). */
+  --color-grid-empty: rgba(0, 122, 255, 0.2);
+  --color-grid-filled: var(--color-accent);
+  --color-check-icon: #ffffff;
+  --color-skeleton: #e5e5ea;
+  --color-skeleton-highlight: #f2f2f7;
+  --color-danger: #ff3b30;
+
+  /* --- Типографика --- */
+  --font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui,
+    "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-size-title: 34px;
+  --font-weight-title: 700;
+  --font-size-habit-name: 17px;
+  --font-weight-habit-name: 600;
+  --font-size-body: 15px;
+  --font-size-secondary: 13px;
+
+  /* --- Скругления --- */
+  --radius-card: 16px;
+  --radius-pill: 999px;
+
+  /* --- Отступы --- */
+  --space-screen-x: 16px; /* горизонтальные поля экрана */
+  --space-screen-top: 12px;
+  --space-card-gap: 12px; /* между карточками */
+  --space-card-padding: 16px; /* внутри карточки */
+  --space-row-gap: 14px; /* между строкой названия и годовой сеткой */
+  --space-title-bottom: 16px;
+
+  /* --- Кнопка отметки --- */
+  --check-size: 28px;
+  --check-stroke: 2px;
+
+  /* --- Годовая сетка выполнения --- */
+  --grid-columns: 52;
+  --grid-rows: 7;
+  --grid-gap: 2px; /* зазор между кружками */
+  --grid-dot-radius: 50%; /* кружки */
+
+  /* --- Анимации --- */
+  --transition-fast: 150ms ease;
+
+  /* --- Тени (мягкие, в духе iOS) --- */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+}

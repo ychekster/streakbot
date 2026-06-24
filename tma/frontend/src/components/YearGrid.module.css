@@ -1,0 +1,26 @@
+/*
+ * Сетка из 52 столбцов (число рядов получается автоматически: 364 / 52 = 7).
+ * Кружки — квадратные ячейки 1fr со скруглением 50%, поэтому диаметр подстраивается
+ * под доступную ширину карточки (на узких экранах меньше, на широких — крупнее).
+ * Построчное заполнение (grid-auto-flow по умолчанию) даёт «старое сверху-слева,
+ * сегодня снизу-справа».
+ */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(var(--grid-columns), 1fr);
+  gap: var(--grid-gap);
+  width: 100%;
+}
+
+.cell {
+  aspect-ratio: 1 / 1;
+  border-radius: var(--grid-dot-radius);
+}
+
+.filled {
+  background-color: var(--color-grid-filled);
+}
+
+.empty {
+  background-color: var(--color-grid-empty);
+}
