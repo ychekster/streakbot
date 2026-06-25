@@ -18,10 +18,3 @@
   );
   padding-left: calc(env(safe-area-inset-left) + var(--space-screen-x));
 }
-
-.title {
-  font-size: var(--font-size-title);
-  font-weight: var(--font-weight-title);
-  letter-spacing: -0.02em;
-  margin-bottom: var(--space-title-bottom);
-}

@@ -86,6 +86,9 @@ function applySafeAreaInsets(webApp: TelegramWebApp): void {
   setInset("--app-safe-area-bottom", safe?.bottom);
   setInset("--app-content-safe-area-top", content?.top);
   setInset("--app-content-safe-area-bottom", content?.bottom);
+  // Уведомляем UI (сворачивающийся заголовок) о новых отступах, чтобы он пересчитал
+  // геометрию после асинхронного перехода в полноэкранный режим.
+  window.dispatchEvent(new Event("app:insets"));
 }
 
 /**

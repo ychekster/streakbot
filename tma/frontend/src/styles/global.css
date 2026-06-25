@@ -13,6 +13,18 @@ body {
   height: 100%;
 }
 
+/* Скрыть полосу прокрутки: приложение скроллится без видимого скроллбара. */
+html {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* старый Edge/IE */
+}
+
+::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none; /* WebKit/Chromium — iOS и Android клиенты Telegram */
+}
+
 body {
   font-family: var(--font-family);
   color: var(--color-text-primary);

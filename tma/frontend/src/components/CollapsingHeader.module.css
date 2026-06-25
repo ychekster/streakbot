@@ -1,0 +1,50 @@
+/*
+ * Размытие фона за заголовком на всю ширину экрана. Без фоновой плашки и рамок —
+ * только backdrop-filter. Высота, маска затухания (исходит сверху, плавно гаснет
+ * книзу — без чёткой границы) и прозрачность (по скроллу) задаются из JS. Лежит под
+ * заголовком и под нативными кнопками Telegram, поэтому размытие для них единое.
+ */
+.bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  opacity: 0; /* проявляется ближе к зафиксированному состоянию */
+  background: transparent;
+  -webkit-backdrop-filter: blur(var(--header-blur));
+  backdrop-filter: blur(var(--header-blur));
+  pointer-events: none;
+  will-change: opacity;
+}
+
+/*
+ * Заголовок. Исходно — крупный, слева сверху (CSS top/left + safe area). На скролле
+ * к нему применяется transform (сжатие + сдвиг в центр), посчитанный в JS.
+ */
+.title {
+  position: fixed;
+  z-index: 11;
+  top: calc(
+    var(--app-safe-area-top, env(safe-area-inset-top, 0px)) +
+    var(--app-content-safe-area-top, 0px) + var(--space-screen-top)
+  );
+  left: var(--space-screen-x);
+  margin: 0;
+  font-size: var(--font-size-title);
+  font-weight: var(--font-weight-title);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  transform-origin: left top;
+  pointer-events: none;
+  will-change: transform;
+}
+
+/* Резерв места под крупный заголовок в потоке (точная высота задаётся из JS;
+   запасная высота — до первого замера, чтобы контент сразу не уехал под заголовок). */
+.spacer {
+  flex: none;
+  height: calc(var(--font-size-title) * 1.1 + var(--space-title-bottom));
+}

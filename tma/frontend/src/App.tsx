@@ -9,6 +9,7 @@
 
 import { useEffect } from "react";
 
+import { CollapsingHeader } from "./components/CollapsingHeader";
 import { HabitsSection } from "./components/HabitsSection";
 import { Skeleton } from "./components/Skeleton";
 import { StatusMessage } from "./components/StatusMessage";
@@ -38,7 +39,7 @@ export function App() {
 
   return (
     <main className={styles.screen}>
-      <h1 className={styles.title}>{STRINGS.screenTitle}</h1>
+      <CollapsingHeader title={STRINGS.screenTitle} />
       {renderContent()}
     </main>
   );

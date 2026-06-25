@@ -24,6 +24,7 @@
     "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-size-title: 34px;
   --font-weight-title: 700;
+  --font-size-title-collapsed: 17px; /* размер заголовка в свёрнутом состоянии */
   --font-size-habit-name: 17px;
   --font-weight-habit-name: 600;
   --font-size-body: 15px;
@@ -56,6 +57,11 @@
   --grid-rows: 7;
   --grid-gap: 2px; /* зазор между кружками */
   --grid-dot-radius: 50%; /* кружки */
+
+  /* --- Сворачивающийся заголовок --- */
+  --header-collapsed-row-height: 44px; /* высота строки заголовка, если панели Telegram нет */
+  --header-blur: 20px; /* радиус размытия фона за заголовком (backdrop blur) */
+  --header-fade-tail: 64px; /* высота плавного затухания размытия книзу (без чёткой границы) */
 
   /* --- Анимации --- */
   --transition-fast: 150ms ease;
