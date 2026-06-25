@@ -12,11 +12,18 @@ from tma.backend.constants import GRID_DAYS
 
 
 class Habit(BaseModel):
-    """Привычка пользователя с историей выполнения за год."""
+    """Привычка пользователя: история выполнения и признак расписания на сегодня."""
 
     id: int = Field(..., description="Идентификатор задачи")
     name: str = Field(..., description="Название привычки")
     done_today: bool = Field(..., description="Отмечена ли задача выполненной сегодня")
+    scheduled_today: bool = Field(
+        ...,
+        description=(
+            "Запланирована ли задача на сегодня (по частоте/дням недели). "
+            "True — задачу можно отмечать; False — только просмотр прогресса."
+        ),
+    )
     history: list[bool] = Field(
         ...,
         description=(

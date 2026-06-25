@@ -1,0 +1,26 @@
+/*
+ * Секция = (необязательный) приглушённый подзаголовок + одна общая белая карточка
+ * со скруглением и мягкой тенью, внутри которой стоят блоки привычек.
+ */
+
+/* Между двумя секциями («на сегодня» и «не на сегодня») — увеличенный отступ. */
+.section + .section {
+  margin-top: var(--space-section-gap);
+}
+
+.subheading {
+  margin-bottom: var(--space-subheading-bottom);
+  /* Выравниваем по контенту карточки (её горизонтальный отступ). */
+  padding: 0 var(--space-card-padding);
+  font-size: var(--font-size-secondary);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.card {
+  background-color: var(--color-card);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  /* Горизонтальный отступ карточки; вертикальный задают сами блоки. */
+  padding: 0 var(--space-card-padding);
+}

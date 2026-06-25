@@ -9,8 +9,7 @@
 }
 
 html,
-body,
-#root {
+body {
   height: 100%;
 }
 
@@ -33,8 +32,10 @@ button {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Аккуратная прокрутка списка. */
+/* Контейнер растёт вместе с содержимым (min-height вместо фиксированной height:100%),
+   поэтому при прокрутке нижний отступ экрана не «съедается» и остаётся видимым. */
 #root {
+  min-height: 100%;
   display: flex;
   flex-direction: column;
 }

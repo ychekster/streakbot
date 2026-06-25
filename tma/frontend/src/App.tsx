@@ -9,7 +9,7 @@
 
 import { useEffect } from "react";
 
-import { HabitCard } from "./components/HabitCard";
+import { HabitsSection } from "./components/HabitsSection";
 import { Skeleton } from "./components/Skeleton";
 import { StatusMessage } from "./components/StatusMessage";
 import { useHabits } from "./hooks/useHabits";
@@ -81,12 +81,22 @@ export function App() {
       );
     }
 
+    // Две секции: запланированные на сегодня (интерактивные) и остальные (только просмотр).
+    const scheduledHabits = habits.filter((habit) => habit.scheduled_today);
+    const otherHabits = habits.filter((habit) => !habit.scheduled_today);
     return (
-      <div className={styles.list}>
-        {habits.map((habit) => (
-          <HabitCard key={habit.id} habit={habit} onToggle={toggle} />
-        ))}
-      </div>
+      <>
+        {scheduledHabits.length > 0 ? (
+          <HabitsSection habits={scheduledHabits} interactive onToggle={toggle} />
+        ) : null}
+        {otherHabits.length > 0 ? (
+          <HabitsSection
+            habits={otherHabits}
+            interactive={false}
+            subheading={STRINGS.otherSubheading}
+          />
+        ) : null}
+      </>
     );
   }
 }

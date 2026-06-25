@@ -7,17 +7,31 @@ interface CheckButtonProps {
   /** Доступная подпись (название привычки) — для скринридеров. */
   habitName: string;
   onToggle: () => void;
+  /** Неактивная кнопка: показывает статус, но не реагирует на нажатие (только просмотр). */
+  disabled?: boolean;
 }
 
-export function CheckButton({ done, habitName, onToggle }: CheckButtonProps) {
+export function CheckButton({
+  done,
+  habitName,
+  onToggle,
+  disabled = false,
+}: CheckButtonProps) {
   return (
     <button
       type="button"
-      className={`${styles.button} ${done ? styles.done : ""}`}
-      onClick={onToggle}
+      className={`${styles.button} ${done ? styles.done : ""} ${
+        disabled ? styles.disabled : ""
+      }`}
+      onClick={disabled ? undefined : onToggle}
+      disabled={disabled}
       aria-pressed={done}
       aria-label={
-        done ? `Снять отметку: ${habitName}` : `Отметить выполнено: ${habitName}`
+        disabled
+          ? `${habitName}: ${done ? "выполнено" : "сегодня не запланировано"}`
+          : done
+            ? `Снять отметку: ${habitName}`
+            : `Отметить выполнено: ${habitName}`
       }
     >
       {/* Галочка появляется только в выполненном состоянии. */}

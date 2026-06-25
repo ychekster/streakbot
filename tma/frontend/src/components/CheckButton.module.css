@@ -16,8 +16,14 @@
     border-color var(--transition-fast), transform var(--transition-fast);
 }
 
-.button:active {
+.button:active:not(.disabled) {
   transform: scale(0.92);
+}
+
+/* Неактивная кнопка (только просмотр прогресса): приглушена и не реагирует на нажатие. */
+.disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .done {

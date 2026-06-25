@@ -10,10 +10,11 @@
   --color-text-primary: #1c1c1e;
   --color-text-secondary: #8e8e93;
   --color-accent: #007aff; /* системный синий iOS */
-  /* Акцентный цвет с прозрачностью для пропущенных дней в годовой сетке (~20%). */
+  /* Акцентный цвет с прозрачностью для пропущенных дней в сетке (~20%). */
   --color-grid-empty: rgba(0, 122, 255, 0.2);
   --color-grid-filled: var(--color-accent);
   --color-check-icon: #ffffff;
+  --color-separator: rgba(60, 60, 67, 0.1); /* бледная линия-разделитель (малозаметная) */
   --color-skeleton: #e5e5ea;
   --color-skeleton-highlight: #f2f2f7;
   --color-danger: #ff3b30;
@@ -35,10 +36,16 @@
   /* --- Отступы --- */
   --space-screen-x: 16px; /* горизонтальные поля экрана */
   --space-screen-top: 12px;
-  --space-card-gap: 12px; /* между карточками */
-  --space-card-padding: 16px; /* внутри карточки */
-  --space-row-gap: 14px; /* между строкой названия и годовой сеткой */
+  --space-screen-bottom: 32px; /* нижний отступ, чтобы последняя привычка не прилипала к краю */
+  --space-card-gap: 12px; /* между элементами списка-заглушки */
+  --space-card-padding: 16px; /* внутри карточки и блока привычки */
+  --space-row-gap: 14px; /* между строкой названия и сеткой */
   --space-title-bottom: 16px;
+  --space-section-gap: 24px; /* между секциями «на сегодня» и «не на сегодня» */
+  --space-subheading-bottom: 8px; /* под приглушённым подзаголовком секции */
+  /* Верхний отступ блока ниже линии-разделителя. Он больше нижнего (--space-card-padding),
+     поэтому между блоками чуть просторнее, а линия проходит выше середины зазора. */
+  --space-block-gap-below-line: 22px;
 
   /* --- Кнопка отметки --- */
   --check-size: 28px;

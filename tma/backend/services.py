@@ -45,18 +45,33 @@ async def build_history(repo: Repository, task_id: int, today: date) -> list[boo
     return [(start + timedelta(days=offset)) in done_dates for offset in range(GRID_DAYS)]
 
 
-async def build_habit(repo: Repository, task: Task, today: date) -> Habit:
-    """Собрать схему `Habit` по задаче: название, отметка за сегодня и история выполнения."""
+async def build_habit(
+    repo: Repository, task: Task, today: date, scheduled_today: bool
+) -> Habit:
+    """Собрать схему `Habit`: название, отметка за сегодня, признак расписания и история."""
     history = await build_history(repo, task.id, today)
     # Последний элемент истории — сегодняшний день, поэтому он же определяет done_today.
-    return Habit(id=task.id, name=task.name, done_today=history[-1], history=history)
+    return Habit(
+        id=task.id,
+        name=task.name,
+        done_today=history[-1],
+        scheduled_today=scheduled_today,
+        history=history,
+    )
+
+
+async def _due_today_ids(repo: Repository, user: User, today: date) -> set[int]:
+    """Id задач, запланированных на сегодня (по частоте/дням недели) — через репозиторий."""
+    due = await repo.get_tasks_due_on(user.telegram_id, today)
+    return {task.id for task in due}
 
 
 async def list_habits(repo: Repository, user: User) -> list[Habit]:
-    """Все активные привычки пользователя с историей выполнения (для `GET /tasks`)."""
+    """Все активные привычки пользователя с историей и признаком расписания (для `GET /tasks`)."""
     today = user_today(user)
     tasks = await repo.get_active_tasks(user.telegram_id)
-    return [await build_habit(repo, task, today) for task in tasks]
+    due_ids = await _due_today_ids(repo, user, today)
+    return [await build_habit(repo, task, today, task.id in due_ids) for task in tasks]
 
 
 async def toggle_today(repo: Repository, user: User, task: Task) -> Habit:
@@ -69,4 +84,5 @@ async def toggle_today(repo: Repository, user: User, task: Task) -> Habit:
     log = await repo.get_or_create_log(task.id, user.telegram_id, today)
     target = TaskStatus.pending if log.status == TaskStatus.done else TaskStatus.done
     await repo.set_log_status(log, target)
-    return await build_habit(repo, task, today)
+    due_ids = await _due_today_ids(repo, user, today)
+    return await build_habit(repo, task, today, task.id in due_ids)
