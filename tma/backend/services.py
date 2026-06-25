@@ -13,7 +13,7 @@ import pytz
 
 from bot.database.models import Task, TaskStatus, User
 from bot.database.repository import Repository
-from tma.backend.constants import YEAR_GRID_DAYS
+from tma.backend.constants import GRID_DAYS
 from tma.backend.schemas import Habit
 
 
@@ -34,19 +34,19 @@ def user_today(user: User) -> date:
 
 
 async def build_history(repo: Repository, task_id: int, today: date) -> list[bool]:
-    """История выполнения задачи за последние `YEAR_GRID_DAYS` дней (старое → сегодня).
+    """История выполнения задачи за последние `GRID_DAYS` дней (старое → сегодня).
 
     True — в этот день есть лог со статусом `done`, иначе False. Та же логика
-    «закрашен = done», что и в PNG-баннерах бота, но окно — год вместо 30 дней.
+    «закрашен = done», что и в PNG-баннерах бота, но окно — полгода (182 дня) вместо 30.
     """
     logs = await repo.get_logs_for_task(task_id)
     done_dates = {log.scheduled_date for log in logs if log.status == TaskStatus.done}
-    start = today - timedelta(days=YEAR_GRID_DAYS - 1)
-    return [(start + timedelta(days=offset)) in done_dates for offset in range(YEAR_GRID_DAYS)]
+    start = today - timedelta(days=GRID_DAYS - 1)
+    return [(start + timedelta(days=offset)) in done_dates for offset in range(GRID_DAYS)]
 
 
 async def build_habit(repo: Repository, task: Task, today: date) -> Habit:
-    """Собрать схему `Habit` по задаче: название, отметка за сегодня и годовая история."""
+    """Собрать схему `Habit` по задаче: название, отметка за сегодня и история выполнения."""
     history = await build_history(repo, task.id, today)
     # Последний элемент истории — сегодняшний день, поэтому он же определяет done_today.
     return Habit(id=task.id, name=task.name, done_today=history[-1], history=history)

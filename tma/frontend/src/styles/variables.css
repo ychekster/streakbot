@@ -44,8 +44,8 @@
   --check-size: 28px;
   --check-stroke: 2px;
 
-  /* --- Годовая сетка выполнения --- */
-  --grid-columns: 52;
+  /* --- Сетка выполнения --- */
+  --grid-columns: 26;
   --grid-rows: 7;
   --grid-gap: 2px; /* зазор между кружками */
   --grid-dot-radius: 50%; /* кружки */

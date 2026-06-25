@@ -4,9 +4,9 @@
  * здесь — значения, нужные именно логике на TypeScript.
  */
 
-/** Длина годовой истории выполнения: 7 рядов × 52 столбца. Должна совпадать с
- *  YEAR_GRID_DAYS на бэкенде (tma/backend/constants.py). */
-export const YEAR_GRID_DAYS = 364;
+/** Длина истории выполнения: 7 рядов × 26 столбцов. Должна совпадать с
+ *  GRID_DAYS на бэкенде (tma/backend/constants.py). */
+export const GRID_DAYS = 182;
 
 /** Сколько карточек-заглушек показывать во время первичной загрузки. */
 export const SKELETON_HABIT_COUNT = 3;

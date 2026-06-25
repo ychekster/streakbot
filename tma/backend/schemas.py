@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from tma.backend.constants import YEAR_GRID_DAYS
+from tma.backend.constants import GRID_DAYS
 
 
 class Habit(BaseModel):
@@ -20,7 +20,7 @@ class Habit(BaseModel):
     history: list[bool] = Field(
         ...,
         description=(
-            f"Выполнение за последние {YEAR_GRID_DAYS} дней (старое → сегодня). "
+            f"Выполнение за последние {GRID_DAYS} дней (старое → сегодня). "
             "True — день выполнен (статус done), False — пропущен или нет данных. "
             "Индекс 0 — самый старый день, последний — сегодня."
         ),
